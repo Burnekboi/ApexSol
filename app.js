@@ -253,7 +253,7 @@ bot.onText(/\/start/, msg => {
 
   bot.sendMessage(
     chatId,
-  `💼 *ApexSol Multi Wallet Bot*
+  `🥒 *Cucumverse Multi Wallet Bot*
 
 A multi-wallet trading assistant for Pump.fun tokens.
 
@@ -285,7 +285,7 @@ if (data === 'main_menu') {
   const session = sessions[chatId];
   bot.sendMessage(
     chatId,
-    `💼 *ApexSol Multi Wallet Bot*\n\nUse the menu below to begin.`,
+    `🥒 *Cucumverse Multi Wallet Bot*\n\nUse the menu below to begin.`,
     { parse_mode: 'Markdown', ...mainMenu() }
   );
 }
@@ -475,7 +475,16 @@ if (data === 'import_wallet') {
   if (data === 'distribute_sol') {
     if (!session.mainWallet || session.buyers.length === 0) return bot.sendMessage(chatId, '❌ Generate wallets first.');
     const mainBalance = await getBalance(session.mainWallet.publicKey);
-    if (mainBalance <= 0) return bot.sendMessage(chatId, '❌ Main wallet has no SOL.');
+    if (mainBalance <= 0) {
+  return bot.sendMessage(
+    chatId,
+    `⚠️ *Insufficient Balance*\n\n` +
+    `Your main wallet has no SOL.\n` +
+    `You need SOL to proceed to the Trade Panel.\n\n` +
+    `Please deposit SOL and try again.`,
+    { parse_mode: 'Markdown' }
+  );
+}
     bot.sendMessage(chatId, `Enter total SOL to distribute (Available: ${mainBalance} SOL):`);
     return bot.once('message', async (msg) => {
       const totalSol = parseFloat(msg.text);
@@ -1218,3 +1227,4 @@ async function transferAllToAddress(session, chatId, receiverPubkey, buyers) {
   );
 }
 });
+
