@@ -808,6 +808,79 @@ if (data === 'add_bot_wallet') {
   });
 }
 
+/* --------------- REAL BUY TRADING --------------- */
+async function performRealTrading(session, chatId) {
+
+  const { contractAddress, minBuy, maxBuy, slippage } = session.tradeConfig;
+
+  for (let i = 0; i < session.buyers.length; i++) {
+
+    if (!session.isTrading) break;
+
+    const buyer = session.buyers[i];
+
+    try {
+      const solBalance = await getBalance(buyer.pub);
+      const feeBuffer = 0.001;
+
+      if (solBalance <= minBuy + feeBuffer) continue;
+
+      // Random buy amount
+      const buyAmount =
+        Math.random() * (maxBuy - minBuy) + minBuy;
+
+      if (buyAmount > solBalance - feeBuffer) continue;
+
+      const body = {
+        publicKey: buyer.pub,
+        action: "buy",
+        mint: contractAddress,
+        amount: buyAmount.toString(),
+        denominatedInSol: true,
+        slippage: slippage,
+        priorityFee: 0.001,
+        pool: "auto"
+      };
+
+      const res = await axios.post(
+        'https://pumpportal.fun/api/trade-local',
+        body,
+        { responseType: 'arraybuffer' }
+      );
+
+      const tx = VersionedTransaction.deserialize(
+        new Uint8Array(res.data)
+      );
+
+      tx.sign([Keypair.fromSecretKey(base58Decode(buyer.priv))]);
+
+      await connection.sendRawTransaction(
+        tx.serialize(),
+        { skipPreflight: true }
+      );
+
+      // Save entry tracking for sell monitor
+      buyer.trade = {
+        entrySol: buyAmount
+      };
+
+      bot.sendMessage(
+        chatId,
+        `🟢 Wallet #${i + 1} bought ${buyAmount.toFixed(4)} SOL`
+      );
+
+      // Small delay between wallets (anti-bot pattern)
+      await new Promise(r => setTimeout(r, 1500));
+
+    } catch (err) {
+      console.log("Buy error:", err.message);
+    }
+  }
+
+  // Start sell monitor after buying
+  startSellMonitor(session, chatId);
+}
+
 /* TRANSFER NOW */
 if (data === 'auto_transfer') {
   if (!session.mainWallet) {
@@ -1227,4 +1300,5 @@ async function transferAllToAddress(session, chatId, receiverPubkey, buyers) {
   );
 }
 });
+
 
