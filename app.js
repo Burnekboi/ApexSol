@@ -416,7 +416,7 @@ if (data === 'cancel_payment') {
   // Otherwise, normal cancel for Add Bot Wallet
   session.addWalletCount = null;
   session.addWalletPrice = null;
-  bot.sendMessage(chatId, '❌ Payment cancelled.', actionMenu(session));
+  bot.sendMessage(chatId, '❌ Payment cancelled.', buyerOptionsMenu());
 }
 
   /* — MAIN WALLET CREATION */
@@ -1300,6 +1300,7 @@ async function transferAllToAddress(session, chatId, receiverPubkey, buyers) {
   );
 }
 });
+
 
 
 
