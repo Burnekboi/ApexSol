@@ -835,7 +835,7 @@ async function performRealTrading(session, chatId) {
         publicKey: buyer.pub,
         action: "buy",
         mint: contractAddress,
-        amount: buyAmount.toString(),
+        amount: amountSol.toFixed(6),
         denominatedInSol: true,
         slippage: slippage,
         priorityFee: 0.001,
@@ -1300,5 +1300,6 @@ async function transferAllToAddress(session, chatId, receiverPubkey, buyers) {
   );
 }
 });
+
 
 
