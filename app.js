@@ -25,7 +25,7 @@ mongoose.connect(process.env.MONGO_URI)
 const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true });
 
 // Split multi-RPC string and helper for random connection
-const rpcList = process.env.RPC_URL.split(',').map(url => url.trim());
+const rpcList = (process.env.RPC_URL || "https://api.mainnet-beta.solana.com").split(',').map(url => url.trim());
 function getSmartConnection() {
   const randomRpc = rpcList[Math.floor(Math.random() * rpcList.length)];
   console.log(`📡 Using RPC: ${randomRpc.split('.')[0]}...`);
@@ -36,7 +36,11 @@ const connection = getSmartConnection();
 /* =====================================================
    CUCUMVERSE API BRIDGE
 ===================================================== */
-app.use(cors());
+app.use(cors({
+  origin: process.env.FRONTEND_URL || "*", // Supports Vercel URL via Env Var
+  credentials: true
+}));
+
 app.use(bodyParser.json({ limit: '50mb' }));
 app.use(bodyParser.urlencoded({ limit: '50mb', extended: true }));
 
