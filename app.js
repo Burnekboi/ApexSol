@@ -150,12 +150,11 @@ app.post('/api/deploy', async (req, res) => {
       // 4. Import Solana helper
       const { handleDeployRequest } = require('./helpers/solana');
 
-      // 5. Send Telegram Notification
-      bot.sendMessage(chatId, "🚀 **Cucumverse Engine Engaged...**\n\nStarting deployment. I will notify you here once the mint is confirmed.", { parse_mode: 'Markdown' })
-        .catch(e => console.error("Bot Send Error:", e.message));
+      // 5. Use the Trade Panel Message ID to inject the Live Terminal
+      const termMsgId = session.tradePanelMsgId || null;
 
-      // 6. Run Logic
-      handleDeployRequest(bot, connection, data, chatId, session);
+      // 6. Run Logic asynchronously inside the Trade Panel
+      handleDeployRequest(bot, connection, data, chatId, session, termMsgId);
     }
   } catch (err) {
     console.error("❌ API Route Error:", err);
@@ -226,22 +225,14 @@ bot.onText(/\/start/, async (msg) => {
   }
 
   // 3. Original Message Text Restored
-  await bot.sendMessage(
+  const sentMsg = await bot.sendMessage(
     chatId,
-    `🥒 *Cucumverse Multi Wallet Bot*
-
-A multi-wallet trading assistant for Pump.fun tokens.
-
-• Manage main & buyer wallets
-• Configure trade settings
-• Volume Pumping
-• Stealth Sniper
-• Auto-sell Instant
-
-Use the menu below to begin.`,
+    `🥒 *Cucumverse Multi Wallet Bot*\n\nA multi-wallet trading assistant for Pump.fun tokens.\n\n• Manage main & buyer wallets\n• Configure trade settings\n• Volume Pumping\n• Stealth Sniper\n• Auto-sell Instant\n\nUse the menu below to begin.`,
     { parse_mode: 'Markdown', ...panels.mainMenu() }
   );
+  session.tradePanelMsgId = sentMsg.message_id;
 });
+
 
 /* =====================================================
    CALLBACK HANDLER
