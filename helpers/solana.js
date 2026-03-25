@@ -186,6 +186,11 @@ async function handleDeployRequest(bot, connection, data, chatId, session, termM
       `🔗 Tx: \`https://solscan.io/tx/${signature}\``
     );
 
+    session.liveLogs.push({
+      status: 'success',
+      message: `🎉 You've deployed ${symbol} token!`
+    });
+
     // ---------------- SWARM BUY ----------------
     if (autoBuyEnabled && selectedBotIds.length > 0) {
       const activeBuyers = (session.buyers || []).filter(b =>
