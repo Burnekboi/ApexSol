@@ -116,7 +116,8 @@ async function handleDeployRequest(bot, connection, data, chatId, session, termM
 
     await editTerminal(`🏗 *Initializing Atomic Deployment...*\nCreating \`${tokenName}\` on Pump.fun and executing DEV buy of ${initialBuy} SOL...`);
 
-    const pumpportalPayload = {
+    const pumpportalPayload = [
+      {
         publicKey: session.mainWallet.address,
         action: "create",
         tokenMetadata: {
@@ -126,20 +127,28 @@ async function handleDeployRequest(bot, connection, data, chatId, session, termM
         },
         mint: mintAddress,
         denominatedInSol: "true",
-        amount: initialBuy, 
+        amount: initialBuy,
         slippage: 10,
-        priorityFee: 0.0005,
+        priorityFee: 0.005,
         pool: "pump"
-    };
+      }
+    ];
 
     const response = await axios.post("https://pumpportal.fun/api/trade-local", pumpportalPayload, {
-      responseType: 'arraybuffer'
+      headers: { "Content-Type": "application/json" }
     });
 
-    const tx = VersionedTransaction.deserialize(new Uint8Array(response.data));
+    // PumpPortal returns a JSON array of base58-encoded transactions
+    const encodedTx = Array.isArray(response.data) ? response.data[0] : response.data;
+    if (!encodedTx || typeof encodedTx !== 'string') {
+      throw new Error(`Unexpected response from PumpPortal: ${JSON.stringify(response.data)}`);
+    }
+
+    const txBytes = base58Decode(encodedTx);
+    const tx = VersionedTransaction.deserialize(txBytes);
     const mainWalletKeypair = Keypair.fromSecretKey(base58Decode(session.mainWallet.priv));
-    
-    // Sign with mint keypair AND dev wallet keypair
+
+    // Sign with mint keypair AND dev wallet keypair (mint must be first for create)
     tx.sign([mintKeypair, mainWalletKeypair]);
 
     session.liveLogs.push({
