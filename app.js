@@ -25,27 +25,10 @@ mongoose.connect(process.env.MONGO_URI)
 /* =====================================================
    BOT + SMART RPC CONNECTION
 ===================================================== */
-const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: false });
+const WEBHOOK_URL = process.env.WEBHOOK_URL; // e.g. https://your-app.railway.app
+const WEBHOOK_PATH = `/webhook/${process.env.BOT_TOKEN}`;
 
-// Drop any existing webhook/polling session, then start cleanly.
-// This prevents 409 Conflict when Railway redeploys over a running instance.
-bot.deleteWebhook({ drop_pending_updates: true })
-  .then(() => new Promise(r => setTimeout(r, 2000)))
-  .then(() => bot.startPolling({ polling: { params: { timeout: 10 } } }))
-  .then(() => console.log('🤖 Bot polling started'))
-  .catch(err => console.error('Bot start error:', err.message));
-
-bot.on('polling_error', (err) => {
-  if (err.code === 'ETELEGRAM' && err.message.includes('409')) {
-    console.warn('⚠️ 409 Conflict — stopping and restarting polling in 5s...');
-    bot.stopPolling()
-      .then(() => new Promise(r => setTimeout(r, 5000)))
-      .then(() => bot.startPolling())
-      .catch(() => {});
-  } else {
-    console.error('Polling error:', err.message);
-  }
-});
+const bot = new TelegramBot(process.env.BOT_TOKEN, { webHook: false });
 
 // Split multi-RPC string and helper for random connection
 const rpcList = (process.env.RPC_URL || "https://api.mainnet-beta.solana.com").split(',').map(url => url.trim());
@@ -232,23 +215,37 @@ app.post('/api/deploy', async (req, res) => {
   console.log("-----------------------------------------------\n");
 });
 
+// Telegram webhook endpoint — receives updates from Telegram
+app.post(WEBHOOK_PATH, (req, res) => {
+  bot.processUpdate(req.body);
+  res.sendStatus(200);
+});
+
 const PORT = process.env.PORT || 3000;
-const server = app.listen(PORT, () => {
+const server = app.listen(PORT, async () => {
   console.log(`\n=====================================================`);
   console.log(`🚀 CUCUMVERSE API SERVER LIVE ON PORT ${PORT}`);
   console.log(`=====================================================\n`);
+
+  if (!WEBHOOK_URL) {
+    console.error('❌ WEBHOOK_URL env var is not set! Bot will not receive updates.');
+    return;
+  }
+
+  try {
+    await bot.setWebHook(`${WEBHOOK_URL}${WEBHOOK_PATH}`, { drop_pending_updates: true });
+    console.log(`🤖 Webhook set: ${WEBHOOK_URL}${WEBHOOK_PATH}`);
+  } catch (err) {
+    console.error('❌ Failed to set webhook:', err.message);
+  }
 });
 
-// Graceful shutdown — ensures bot polling stops cleanly before Railway kills the process
-// This prevents the 409 Conflict on the next deploy
-process.once('SIGTERM', async () => {
+process.once('SIGTERM', () => {
   console.log('🛑 SIGTERM received — shutting down gracefully...');
-  await bot.stopPolling().catch(() => {});
   server.close(() => process.exit(0));
 });
 
-process.once('SIGINT', async () => {
-  await bot.stopPolling().catch(() => {});
+process.once('SIGINT', () => {
   server.close(() => process.exit(0));
 });
 
