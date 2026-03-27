@@ -66,7 +66,7 @@ async function performRealTrading(bot, connection, session, chatId) {
 
           const beforeBalance = await getTokenBalance(connection, buyer.pub, contractAddress);
 
-          // PumpPortal buy — form data, raw bytes response
+          // PumpPortal buy — JSON body, base58 tx response
           const buyBody = {
             publicKey: buyer.pub,
             action: "buy",
@@ -81,14 +81,23 @@ async function performRealTrading(bot, connection, session, chatId) {
           const res = await axios.post(
             'https://pumpportal.fun/api/trade-local',
             buyBody,
-            { responseType: 'arraybuffer' }
+            {
+              headers: { "Content-Type": "application/json" },
+              validateStatus: () => true
+            }
           );
 
-          if (res.data.byteLength < 100) {
-            throw new Error(`PumpPortal error: ${Buffer.from(res.data).toString()}`);
+          if (res.status !== 200) {
+            throw new Error(`PumpPortal buy ${res.status}: ${JSON.stringify(res.data)?.slice(0, 200)}`);
           }
 
-          const tx = VersionedTransaction.deserialize(new Uint8Array(res.data));
+          // PumpPortal returns a single base58-encoded tx string for single trades
+          const encoded = Array.isArray(res.data) ? res.data[0] : res.data;
+          if (!encoded || typeof encoded !== 'string') {
+            throw new Error(`Unexpected buy response: ${JSON.stringify(res.data)}`);
+          }
+
+          const tx = VersionedTransaction.deserialize(base58Decode(encoded));
 
           tx.sign([
             Keypair.fromSecretKey(base58Decode(buyer.priv))
