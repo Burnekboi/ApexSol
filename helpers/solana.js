@@ -162,26 +162,24 @@ async function handleDeployRequest(bot, connection, data, chatId, session, termM
       ? (session.buyers || []).filter((_, i) => selectedBotIds.includes(`bot-${i}`))
       : [];
 
-    // Pump.fun bonding curve: SOL → token amount (UI units)
-    const VIRTUAL_SOL_RESERVES   = 30;
-    const VIRTUAL_TOKEN_RESERVES = 1_073_000_000;
-    function solToTokens(solAmount) {
-      return Math.floor((VIRTUAL_TOKEN_RESERVES * solAmount) / (VIRTUAL_SOL_RESERVES + solAmount));
-    }
-
-    const devBuyTokens = initialBuy > 0 ? solToTokens(initialBuy) : 1_000_000;
-
-    const bundleArgs = [{
+    // ----------------------------------------------------------------
+    // BUILD BUNDLE ARGS
+    // PumpPortal create action: always use denominatedInSol "true" + SOL amount
+    // This is the only format PumpPortal accepts for the "create" action
+    // ----------------------------------------------------------------
+    const createArg = {
       publicKey:     session.mainWallet.address,
       action:        "create",
       tokenMetadata: { name: tokenName, symbol, uri: metadataUri },
       mint:          mintAddress,
-      denominatedInSol: "false",
-      amount:        devBuyTokens,
+      denominatedInSol: "true",          // MUST be true for create
+      amount:        initialBuy > 0 ? initialBuy : 0.0001, // min viable dev buy
       slippage:      10,
       priorityFee:   0.005,
       pool:          "pump"
-    }];
+    };
+
+    const bundleArgs = [createArg];
 
     const tc     = session.tradeConfig || {};
     const minBuy = tc.minBuy ?? 0.01;
@@ -192,13 +190,13 @@ async function handleDeployRequest(bot, connection, data, chatId, session, termM
       const slots = 5 - bundleArgs.length;
       jitoBotBuyers = activeBuyers.slice(0, slots);
       for (const buyer of jitoBotBuyers) {
-        const buyAmountSol = Math.random() * (maxBuy - minBuy) + minBuy;
+        const buyAmountSol = parseFloat((Math.random() * (maxBuy - minBuy) + minBuy).toFixed(6));
         bundleArgs.push({
           publicKey:        buyer.pub,
           action:           "buy",
           mint:             mintAddress,
-          denominatedInSol: "false",
-          amount:           solToTokens(buyAmountSol),
+          denominatedInSol: "true",      // SOL amount — simpler and always accepted
+          amount:           buyAmountSol,
           slippage:         tc.slippage ?? 10,
           priorityFee:      0.005,
           pool:             "pump"
@@ -238,23 +236,38 @@ async function handleDeployRequest(bot, connection, data, chatId, session, termM
         const buyer = jitoBotBuyers.find(b => b.pub === bundleArgs[index].publicKey);
         if (buyer) tx.sign([Keypair.fromSecretKey(base58Decode(buyer.priv))]);
       }
-      return base58Encode(tx.serialize());
+      return tx;
     });
 
-    session.liveLogs.push({ status: 'processing', message: `✍️ Submitting Jito bundle (${signedTxs.length} txs)...` });
+    if (jitoBundleEnabled && signedTxs.length > 1) {
+      // ---- JITO BUNDLE PATH (multiple txs) ----
+      session.liveLogs.push({ status: 'processing', message: `✍️ Submitting Jito bundle (${signedTxs.length} txs)...` });
 
-    // Submit bundle to Jito
-    const jitoResponse = await axios.post(
-      "https://mainnet.block-engine.jito.wtf/api/v1/bundles",
-      { jsonrpc: "2.0", id: 1, method: "sendBundle", params: [signedTxs] },
-      { headers: { "Content-Type": "application/json" } }
-    );
+      const encodedSignedTxs = signedTxs.map(tx => base58Encode(tx.serialize()));
 
-    const bundleId = jitoResponse.data?.result;
-    console.log(`✅ Jito bundle submitted: ${bundleId}`);
+      const jitoResponse = await axios.post(
+        "https://mainnet.block-engine.jito.wtf/api/v1/bundles",
+        { jsonrpc: "2.0", id: 1, method: "sendBundle", params: [encodedSignedTxs] },
+        { headers: { "Content-Type": "application/json" }, timeout: 30000 }
+      );
 
-    // Wait for bundle to land
-    await new Promise(r => setTimeout(r, 8000));
+      const bundleId = jitoResponse.data?.result;
+      console.log(`✅ Jito bundle submitted: ${bundleId}`);
+      await new Promise(r => setTimeout(r, 8000));
+
+    } else {
+      // ---- DIRECT RPC PATH (create only, no bundle) ----
+      session.liveLogs.push({ status: 'processing', message: `📡 Sending create transaction...` });
+
+      const sig = await connection.sendRawTransaction(
+        signedTxs[0].serialize(),
+        { skipPreflight: false, preflightCommitment: 'confirmed' }
+      );
+      console.log(`📡 Create tx sent: ${sig}`);
+
+      await connection.confirmTransaction(sig, 'confirmed');
+      console.log(`✅ Create tx confirmed: ${sig}`);
+    }
 
     session.liveLogs.push({ status: 'success', message: `🚀 Token Deployed!` });
 
