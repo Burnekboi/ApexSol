@@ -1,4 +1,6 @@
 require('dotenv').config();
+process.removeAllListeners('warning');
+process.on('warning', (w) => { if (w.name !== 'DeprecationWarning' || !w.message.includes('punycode')) console.warn(w); });
 const TelegramBot = require('node-telegram-bot-api');
 const { Connection } = require('@solana/web3.js');
 const { sessions, getSession } = require('./sessions');
