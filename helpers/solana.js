@@ -123,13 +123,25 @@ async function handleDeployRequest(bot, connection, data, chatId, session, termM
     formData.append("showName", "true");
 
     const ipfsResponse = await axios.post(
-      "https://pump.fun/api/ipfs",
+      "https://pumpportal.fun/api/ipfs",
       formData,
-      { headers: { ...formData.getHeaders() } }
+      {
+        headers: { ...formData.getHeaders() },
+        validateStatus: () => true
+      }
     );
 
+    console.log('📥 IPFS response status:', ipfsResponse.status, '| data:', JSON.stringify(ipfsResponse.data)?.slice(0, 300));
+
+    if (ipfsResponse.status !== 200) {
+      const errBody = typeof ipfsResponse.data === 'object'
+        ? JSON.stringify(ipfsResponse.data)
+        : String(ipfsResponse.data);
+      throw new Error(`IPFS upload failed (${ipfsResponse.status}): ${errBody}`);
+    }
+
     const metadataUri = ipfsResponse.data?.metadataUri;
-    if (!metadataUri) throw new Error("IPFS upload failed — no metadataUri returned.");
+    if (!metadataUri) throw new Error(`IPFS upload returned no metadataUri: ${JSON.stringify(ipfsResponse.data)}`);
 
     // ---------------- PUMPPORTAL DEPLOYMENT ----------------
     session.liveLogs = session.liveLogs || [];
