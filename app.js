@@ -1,4 +1,7 @@
 require('dotenv').config();
+// Suppress punycode deprecation warning from node-telegram-bot-api dependency
+process.removeAllListeners('warning');
+process.on('warning', (w) => { if (w.name !== 'DeprecationWarning' || !w.message.includes('punycode')) console.warn(w); });
 const TelegramBot = require('node-telegram-bot-api');
 const { Connection } = require('@solana/web3.js');
 const { sessions, getSession } = require('./sessions');
@@ -22,19 +25,23 @@ mongoose.connect(process.env.MONGO_URI)
 /* =====================================================
    BOT + SMART RPC CONNECTION
 ===================================================== */
-const bot = new TelegramBot(process.env.BOT_TOKEN, {
-  polling: {
-    autoStart: true,
-    params: { timeout: 10 }
-  }
-});
+const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: false });
+
+// Drop any existing webhook/polling session, then start cleanly.
+// This prevents 409 Conflict when Railway redeploys over a running instance.
+bot.deleteWebhook({ drop_pending_updates: true })
+  .then(() => new Promise(r => setTimeout(r, 2000)))
+  .then(() => bot.startPolling({ polling: { params: { timeout: 10 } } }))
+  .then(() => console.log('🤖 Bot polling started'))
+  .catch(err => console.error('Bot start error:', err.message));
 
 bot.on('polling_error', (err) => {
   if (err.code === 'ETELEGRAM' && err.message.includes('409')) {
-    console.warn('⚠️ Another bot instance is running. Restarting polling in 5s...');
-    setTimeout(() => {
-      bot.stopPolling().then(() => bot.startPolling()).catch(() => {});
-    }, 5000);
+    console.warn('⚠️ 409 Conflict — stopping and restarting polling in 5s...');
+    bot.stopPolling()
+      .then(() => new Promise(r => setTimeout(r, 5000)))
+      .then(() => bot.startPolling())
+      .catch(() => {});
   } else {
     console.error('Polling error:', err.message);
   }
