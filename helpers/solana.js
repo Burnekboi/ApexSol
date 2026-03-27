@@ -106,11 +106,23 @@ async function handleDeployRequest(bot, connection, data, chatId, session, termM
         filename: "token_image.png",
         contentType: 'image/png'
       });
-    } else {
+    } else if (data.image || data.tokenImage) {
       const imageSource = data.image || data.tokenImage;
-      if (!imageSource) throw new Error("No token image provided.");
-      const imageRes = await axios.get(imageSource, { responseType: 'arraybuffer' });
-      formData.append("file", Buffer.from(imageRes.data), "token_image.png");
+      try {
+        const imageRes = await axios.get(imageSource, { responseType: 'arraybuffer' });
+        formData.append("file", Buffer.from(imageRes.data), "token_image.png");
+      } catch (imgErr) {
+        console.error('Image fetch error:', imgErr.message);
+        throw new Error(`Failed to fetch token image: ${imgErr.message}. Please provide a valid image URL or upload an image.`);
+      }
+    } else {
+      // Provide a default image if none is supplied
+      console.log('⚠️ No token image provided, using default placeholder');
+      const defaultImageBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
+      formData.append("file", Buffer.from(defaultImageBase64, 'base64'), {
+        filename: "token_image.png",
+        contentType: 'image/png'
+      });
     }
 
     // ---------------- METADATA ----------------
