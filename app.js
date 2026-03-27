@@ -63,6 +63,52 @@ app.get('/api/balance/:address', async (req, res) => {
   }
 });
 
+// TRADE CONFIG GET — returns current trade config for a user
+app.get('/api/trade-config/:chatId', async (req, res) => {
+  try {
+    const chatId = req.params.chatId;
+    const session = await getSession(chatId);
+    const tc = session.tradeConfig || {};
+    res.json({
+      success: true,
+      config: {
+        slippage: tc.slippage ?? 5,
+        minBuy: tc.minBuy ?? 0.01,
+        maxBuy: tc.maxBuy ?? 0.05,
+        takeProfit: tc.takeProfitPercent ?? 20,
+        sellPercent: tc.sellPortionPercent ?? 20
+      }
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// TRADE CONFIG POST — saves trade config from web app to session + DB
+app.post('/api/trade-config', async (req, res) => {
+  try {
+    const { chatId, config } = req.body;
+    if (!chatId || !config) return res.status(400).json({ success: false, error: 'Missing chatId or config' });
+
+    const session = await getSession(chatId);
+    if (!session.tradeConfig) session.tradeConfig = {};
+
+    const tc = session.tradeConfig;
+    if (config.slippage !== undefined)   tc.slippage           = parseFloat(config.slippage);
+    if (config.minBuy !== undefined)     tc.minBuy             = parseFloat(config.minBuy);
+    if (config.maxBuy !== undefined)     tc.maxBuy             = parseFloat(config.maxBuy);
+    if (config.takeProfit !== undefined) tc.takeProfitPercent  = parseFloat(config.takeProfit);
+    if (config.sellPercent !== undefined) tc.sellPortionPercent = parseFloat(config.sellPercent);
+
+    const { saveTradeConfigToDb } = require('./sessions');
+    await saveTradeConfigToDb(chatId, tc);
+
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 app.get('/api/status/:chatId', async (req, res) => {
   try {
     const chatId = req.params.chatId;
