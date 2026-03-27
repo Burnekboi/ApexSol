@@ -238,6 +238,9 @@ const response = await axios.post("https://pump.fun/api/trade-local", bundleArgs
 headers: { "Content-Type": "application/json" },
 timeout: 15000,
 validateStatus: () => true
+})
+timeout: 15000,
+})
 });
 console.log('📥 PumpPortal response status:', response.status, '| data:', JSON.stringify(response.data)?.slice(0, 200));
 
