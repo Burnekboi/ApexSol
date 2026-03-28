@@ -190,8 +190,14 @@ async function handleDeployRequest(bot, connection, data, chatId, session, termM
 
     const priorityFees = { unitLimit: 250000, unitPrice: 250000 };
 
-    // Use getCreateInstructions with our already-uploaded metadataUri
-    // This bypasses the SDK's createTokenMetadata() which uses browser fetch/FormData
+    // Resolve active buyers
+    const activeBuyers = (autoBuyEnabled && selectedBotIds.length > 0)
+      ? (session.buyers || []).filter((_, i) => selectedBotIds.includes(`bot-${i}`))
+      : [];
+
+    const devBuyLamports = BigInt(Math.floor((initialBuy > 0 ? initialBuy : 0.001) * LAMPORTS_PER_SOL));
+
+    // Create token first
     const createTx = await sdk.getCreateInstructions(
       mainKeypair.publicKey,
       tokenName,
@@ -200,21 +206,29 @@ async function handleDeployRequest(bot, connection, data, chatId, session, termM
       mintKeypair
     );
 
-    // Resolve active buyers
-    const activeBuyers = (autoBuyEnabled && selectedBotIds.length > 0)
-      ? (session.buyers || []).filter((_, i) => selectedBotIds.includes(`bot-${i}`))
-      : [];
+    console.log(`🚀 Sending create tx | mint: ${mintAddress}`);
 
-    const devBuyLamports = BigInt(Math.floor((initialBuy > 0 ? initialBuy : 0.001) * LAMPORTS_PER_SOL));
+    const createSig = await buildAndSendTx(
+      connection,
+      [createTx],
+      mainKeypair.publicKey,
+      [mainKeypair, mintKeypair],
+      priorityFees
+    );
 
-    // Build combined create + dev buy transaction
-    const combinedTx = new Transaction().add(createTx);
+    console.log(`✅ Token created! Signature: ${createSig}`);
+    session.liveLogs.push({ status: 'success', message: `🚀 Token Deployed! TX: ${createSig.slice(0, 16)}...` });
 
+    // Wait a bit for creation to be processed
+    await new Promise(resolve => setTimeout(resolve, 2000));
+
+    // Now do the dev buy if needed
     if (devBuyLamports > 0n) {
       const globalAccount = await sdk.getGlobalAccount('confirmed');
-      const buyAmount             = globalAccount.getInitialBuyPrice(devBuyLamports);
+      const buyAmount = globalAccount.getInitialBuyPrice(devBuyLamports);
       const { calculateWithSlippageBuy } = require('pumpdotfun-sdk/dist/cjs/util');
       const buyAmountWithSlippage = calculateWithSlippageBuy(devBuyLamports, 500n);
+      
       const buyTx = await sdk.getBuyInstructions(
         mainKeypair.publicKey,
         mintKeypair.publicKey,
@@ -222,21 +236,21 @@ async function handleDeployRequest(bot, connection, data, chatId, session, termM
         buyAmount,
         buyAmountWithSlippage
       );
-      combinedTx.add(buyTx);
+
+      console.log(`🚀 Sending dev buy tx`);
+      
+      const buySig = await buildAndSendTx(
+        connection,
+        [buyTx],
+        mainKeypair.publicKey,
+        [mainKeypair],
+        priorityFees
+      );
+
+      console.log(`✅ Dev buy completed! Signature: ${buySig}`);
+      session.liveLogs.push({ status: 'success', message: `  Dev Buy Completed! TX: ${buySig.slice(0, 16)}...` });
     }
 
-    console.log(`🚀 Sending create tx | mint: ${mintAddress} | devBuy: ${devBuyLamports} lamports`);
-
-    const sig = await buildAndSendTx(
-      connection,
-      combinedTx.instructions,
-      mainKeypair.publicKey,
-      [mainKeypair, mintKeypair],
-      priorityFees
-    );
-
-    console.log(`✅ Token created! Signature: ${sig}`);
-    session.liveLogs.push({ status: 'success', message: `🚀 Token Deployed! TX: ${sig.slice(0, 16)}...` });
     session.liveLogs.push({ status: 'completed', message: `✅ Deployment finished successfully!` });
 
     await editTerminal(
@@ -272,7 +286,7 @@ async function handleDeployRequest(bot, connection, data, chatId, session, termM
     }
 
     // ---------------- SHOW TRADE PANEL ----------------
-    const { actionMenu } = require('./panels');
+    const { actionMenu } = require('../panels');
     const mainBalance = await getBalance(connection, session.mainWallet.pub);
     const tradePanel = actionMenu(session, mainBalance.toFixed(4));
     
@@ -292,7 +306,7 @@ async function handleDeployRequest(bot, connection, data, chatId, session, termM
     }
     
     // Show Trade panel even on error
-    const { actionMenu } = require('./panels');
+    const { actionMenu } = require('../panels');
     const mainBalance = await getBalance(connection, session?.mainWallet?.pub || session?.mainWallet?.address);
     const tradePanel = actionMenu(session, mainBalance.toFixed(4));
     
