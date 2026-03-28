@@ -22,21 +22,43 @@ function makeWallet(keypair) {
   };
 }
 
-// Build and send a versioned transaction using the SDK's internal helpers
+// Build and send a transaction using regular Transaction for pump.fun compatibility
 async function buildAndSendTx(connection, instructions, payer, signers, priorityFees) {
-  const { buildVersionedTx } = require('pumpdotfun-sdk/dist/cjs/util');
   const tx = new Transaction();
+  
   if (priorityFees) {
     const { ComputeBudgetProgram } = require('@solana/web3.js');
     tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: priorityFees.unitLimit }));
     tx.add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: priorityFees.unitPrice }));
   }
+  
   instructions.forEach(ix => tx.add(ix));
-  const vTx = await buildVersionedTx(connection, payer, tx, 'confirmed');
-  vTx.sign(signers);
-  const sig = await connection.sendTransaction(vTx, { skipPreflight: true });
-  const latest = await connection.getLatestBlockhash();
-  await connection.confirmTransaction({ signature: sig, ...latest }, 'confirmed');
+  
+  // Get recent blockhash
+  const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
+  tx.recentBlockhash = blockhash;
+  tx.feePayer = payer;
+  
+  // Sign transaction
+  tx.sign(...signers);
+  
+  // Send transaction (real deployment, no simulation)
+  const sig = await connection.sendRawTransaction(tx.serialize(), {
+    skipPreflight: true,
+    maxRetries: 3
+  });
+  
+  // Confirm transaction
+  const confirmation = await connection.confirmTransaction({
+    signature: sig,
+    blockhash,
+    lastValidBlockHeight
+  }, 'confirmed');
+  
+  if (confirmation.value.err) {
+    throw new Error(`Transaction failed: ${JSON.stringify(confirmation.value.err)}`);
+  }
+  
   return sig;
 }
 
@@ -215,6 +237,7 @@ async function handleDeployRequest(bot, connection, data, chatId, session, termM
 
     console.log(`✅ Token created! Signature: ${sig}`);
     session.liveLogs.push({ status: 'success', message: `🚀 Token Deployed! TX: ${sig.slice(0, 16)}...` });
+    session.liveLogs.push({ status: 'completed', message: `✅ Deployment finished successfully!` });
 
     await editTerminal(
       `✅ *Deployment Complete!*\n\n` +
@@ -248,9 +271,41 @@ async function handleDeployRequest(bot, connection, data, chatId, session, termM
       session.buyers = originalBuyers;
     }
 
+    // ---------------- SHOW TRADE PANEL ----------------
+    const { actionMenu } = require('./panels');
+    const mainBalance = await getBalance(connection, session.mainWallet.pub);
+    const tradePanel = actionMenu(session, mainBalance.toFixed(4));
+    
+    await bot.sendMessage(chatId, tradePanel.text, {
+      reply_markup: tradePanel.reply_markup,
+      parse_mode: 'Markdown'
+    });
+
   } catch (err) {
     console.error('handleDeployRequest error:', err.message);
-    await bot.sendMessage(chatId, `❌ *Deployment Failed:*\n\`${err.message}\``, { parse_mode: 'Markdown' });
+    
+    // Add error log for webapp
+    if (session) {
+      session.liveLogs = session.liveLogs || [];
+      session.liveLogs.push({ status: 'error', message: `❌ Deployment failed: ${err.message}` });
+      session.liveLogs.push({ status: 'completed', message: `❌ Deployment failed!` });
+    }
+    
+    // Show Trade panel even on error
+    const { actionMenu } = require('./panels');
+    const mainBalance = await getBalance(connection, session?.mainWallet?.pub || session?.mainWallet?.address);
+    const tradePanel = actionMenu(session, mainBalance.toFixed(4));
+    
+    await bot.sendMessage(chatId, 
+      `❌ *Deployment Failed:*\n\`${err.message}\``, 
+      { parse_mode: 'Markdown' }
+    ).then(() => {
+      // Show trade panel after error message
+      return bot.sendMessage(chatId, tradePanel.text, {
+        reply_markup: tradePanel.reply_markup,
+        parse_mode: 'Markdown'
+      });
+    }).catch(() => {});
   }
 }
 
