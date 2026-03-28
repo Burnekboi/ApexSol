@@ -77,7 +77,7 @@ async function performRealTrading(bot, connection, session, chatId) {
           const tokenAmt   = calcBuyTokens(buyLamports, virtualSolReserves, virtualTokenReserves);
           const maxSolCost = buyLamports * 110n / 100n; // 10% slippage
 
-          const buyIx = await buildBuyInstruction(connection, buyerKeypair.publicKey, mint, tokenAmt, maxSolCost, creator);
+          const buyIx = await buildBuyInstruction(connection, buyerKeypair.publicKey, mint, tokenAmt, maxSolCost);
 
           const tx = new Transaction();
           tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 200000 }));
