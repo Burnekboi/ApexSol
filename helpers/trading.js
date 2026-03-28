@@ -1,15 +1,13 @@
-const { Keypair, PublicKey, LAMPORTS_PER_SOL } = require('@solana/web3.js');
+const { Keypair, PublicKey, LAMPORTS_PER_SOL, Transaction, ComputeBudgetProgram } = require('@solana/web3.js');
 const { base58Decode } = require('../utils/base58');
 const {
   getBalance,
   getTokenBalance,
   fetchTokenPriceInSol,
   sellTokenAmount,
-  buildBuyIx,
-  readBondingCurve,
-  readGlobalAccount,
+  buildBuyInstruction,
+  getBondingCurveData,
   calcBuyTokens,
-  withSlippageBuy,
   sendTx
 } = require('./solana');
 
@@ -70,18 +68,23 @@ async function performRealTrading(bot, connection, session, chatId) {
 
           const beforeBalance = await getTokenBalance(connection, buyer.pub, contractAddress);
 
-          // Build buy instruction directly — no SDK, no PumpPortal
           const buyerKeypair = Keypair.fromSecretKey(base58Decode(buyer.priv));
           const mint         = new PublicKey(contractAddress);
           const buyLamports  = BigInt(Math.floor(buyAmount * LAMPORTS_PER_SOL));
 
           // Get current bonding curve state for accurate token amount
-          const { virtualSolReserves, virtualTokenReserves } = await readBondingCurve(connection, mint);
-          const tokenAmt   = calcBuyTokens(virtualSolReserves, virtualTokenReserves, buyLamports);
-          const maxSolCost = withSlippageBuy(buyLamports, 500n);
+          const { virtualSolReserves, virtualTokenReserves, creator } = await getBondingCurveData(connection, mint);
+          const tokenAmt   = calcBuyTokens(buyLamports, virtualSolReserves, virtualTokenReserves);
+          const maxSolCost = buyLamports * 110n / 100n; // 10% slippage
 
-          const buyIxs = await buildBuyIx(connection, buyerKeypair.publicKey, mint, tokenAmt, maxSolCost);
-          const sig    = await sendTx(connection, buyIxs, buyerKeypair.publicKey, [buyerKeypair]);
+          const buyIx = await buildBuyInstruction(connection, buyerKeypair.publicKey, mint, tokenAmt, maxSolCost, creator);
+
+          const tx = new Transaction();
+          tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 200000 }));
+          tx.add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 250000 }));
+          tx.add(buyIx);
+
+          const sig = await sendTx(connection, tx, [buyerKeypair]);
 
           const afterBalance = await getTokenBalance(connection, buyer.pub, contractAddress);
 
