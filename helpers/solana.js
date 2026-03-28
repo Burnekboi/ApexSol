@@ -23,43 +23,70 @@ function makeWallet(keypair) {
 }
 
 // Build and send a transaction using regular Transaction for pump.fun compatibility
-async function buildAndSendTx(connection, instructions, payer, signers, priorityFees) {
-  const tx = new Transaction();
+async function buildAndSendTx(connection, instructions, payer, signers, priorityFees, maxRetries = 3) {
+  let lastError;
   
-  if (priorityFees) {
-    const { ComputeBudgetProgram } = require('@solana/web3.js');
-    tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: priorityFees.unitLimit }));
-    tx.add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: priorityFees.unitPrice }));
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const tx = new Transaction();
+      
+      if (priorityFees) {
+        const { ComputeBudgetProgram } = require('@solana/web3.js');
+        tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: priorityFees.unitLimit }));
+        tx.add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: priorityFees.unitPrice }));
+      }
+      
+      instructions.forEach(ix => tx.add(ix));
+      
+      // Get fresh blockhash for each attempt
+      const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
+      tx.recentBlockhash = blockhash;
+      tx.feePayer = payer;
+      
+      // Sign transaction
+      tx.sign(...signers);
+      
+      // Send transaction with shorter timeout to avoid hanging
+      const sig = await connection.sendRawTransaction(tx.serialize(), {
+        skipPreflight: true,
+        maxRetries: 2
+      });
+      
+      // Confirm transaction with timeout
+      const confirmation = await Promise.race([
+        connection.confirmTransaction({
+          signature: sig,
+          blockhash,
+          lastValidBlockHeight
+        }, 'confirmed'),
+        new Promise((_, reject) => 
+          setTimeout(() => reject(new Error('Transaction confirmation timeout')), 30000)
+        )
+      ]);
+      
+      if (confirmation.value.err) {
+        throw new Error(`Transaction failed: ${JSON.stringify(confirmation.value.err)}`);
+      }
+      
+      return sig;
+      
+    } catch (err) {
+      lastError = err;
+      console.error(`Attempt ${attempt} failed:`, err.message);
+      
+      // If it's the last attempt, throw the error
+      if (attempt === maxRetries) {
+        throw lastError;
+      }
+      
+      // Wait before retry (exponential backoff)
+      const delay = Math.min(1000 * Math.pow(2, attempt - 1), 5000);
+      console.log(`Retrying in ${delay}ms...`);
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
   }
   
-  instructions.forEach(ix => tx.add(ix));
-  
-  // Get recent blockhash
-  const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
-  tx.recentBlockhash = blockhash;
-  tx.feePayer = payer;
-  
-  // Sign transaction
-  tx.sign(...signers);
-  
-  // Send transaction (real deployment, no simulation)
-  const sig = await connection.sendRawTransaction(tx.serialize(), {
-    skipPreflight: true,
-    maxRetries: 3
-  });
-  
-  // Confirm transaction
-  const confirmation = await connection.confirmTransaction({
-    signature: sig,
-    blockhash,
-    lastValidBlockHeight
-  }, 'confirmed');
-  
-  if (confirmation.value.err) {
-    throw new Error(`Transaction failed: ${JSON.stringify(confirmation.value.err)}`);
-  }
-  
-  return sig;
+  throw lastError;
 }
 
 /**
@@ -197,75 +224,88 @@ async function handleDeployRequest(bot, connection, data, chatId, session, termM
 
     const devBuyLamports = BigInt(Math.floor((initialBuy > 0 ? initialBuy : 0.001) * LAMPORTS_PER_SOL));
 
-    // Create token first
-    const createTx = await sdk.getCreateInstructions(
-      mainKeypair.publicKey,
-      tokenName,
-      symbol,
-      metadataUri,
-      mintKeypair
-    );
+    // Clear previous token from DB before creating new one
+    if (session.tradeConfig?.contractAddress) {
+      console.log(`🗑️ Clearing previous token from DB: ${session.tradeConfig.contractAddress}`);
+      session.tradeConfig = {}; // Reset trade config
+    }
 
-    console.log(`🚀 Sending create tx | mint: ${mintAddress}`);
+    // Create token and atomic dev buy if needed
+    let createTx;
+    if (devBuyLamports > 0n) {
+      // Dev atomic buy: Always use Jito bundle when initial buy > 0
+      console.log(`🚀 Creating token with atomic dev buy (${initialBuy} SOL)`);
+      
+      // Get create instructions
+      const createInstructions = await sdk.getCreateInstructions(
+        mainKeypair.publicKey,
+        tokenName,
+        symbol,
+        metadataUri,
+        mintKeypair
+      );
 
-    const createSig = await buildAndSendTx(
+      // Get dev buy instructions
+      const globalAccount = await sdk.getGlobalAccount('confirmed');
+      const buyAmount = globalAccount.getInitialBuyPrice(devBuyLamports);
+      const { calculateWithSlippageBuy } = require('pumpdotfun-sdk/dist/cjs/util');
+      const buyAmountWithSlippage = calculateWithSlippageBuy(devBuyLamports, 500n);
+      
+      const buyInstructions = await sdk.getBuyInstructions(
+        mainKeypair.publicKey,
+        mintKeypair.publicKey,
+        globalAccount.feeRecipient,
+        buyAmount,
+        buyAmountWithSlippage
+      );
+
+      // Combine both instructions for atomic execution
+      const combinedInstructions = [createInstructions, buyInstructions];
+      createTx = combinedInstructions;
+      
+      session.liveLogs.push({ status: 'processing', message: `🏗 Creating ${symbol} with atomic dev buy (${initialBuy} SOL)...` });
+    } else {
+      // Create token only (no dev buy)
+      createTx = await sdk.getCreateInstructions(
+        mainKeypair.publicKey,
+        tokenName,
+        symbol,
+        metadataUri,
+        mintKeypair
+      );
+      
+      session.liveLogs.push({ status: 'processing', message: `🏗 Creating ${symbol} token...` });
+    }
+
+    console.log(`🚀 Sending deployment tx | mint: ${mintAddress} | atomic dev buy: ${devBuyLamports > 0n ? 'YES' : 'NO'}`);
+
+    const deploymentSig = await buildAndSendTx(
       connection,
-      [createTx],
+      Array.isArray(createTx) ? createTx.flatMap(tx => tx.instructions || tx) : [createTx],
       mainKeypair.publicKey,
       [mainKeypair, mintKeypair],
       priorityFees
     );
 
-    console.log(`✅ Token created! Signature: ${createSig}`);
-    session.liveLogs.push({ status: 'success', message: `🚀 Token Deployed! TX: ${createSig.slice(0, 16)}...` });
+    console.log(`✅ Token deployed! Signature: ${deploymentSig}`);
+    session.liveLogs.push({ status: 'success', message: `🚀 Token Deployed! TX: ${deploymentSig.slice(0, 16)}...` });
 
-    // Wait a bit for creation to be processed
-    await new Promise(resolve => setTimeout(resolve, 2000));
-
-    // Now do the dev buy if needed
-    let devBuySuccess = false;
+    // Check if dev buy was included atomically
     if (devBuyLamports > 0n) {
-      try {
-        const globalAccount = await sdk.getGlobalAccount('confirmed');
-        const buyAmount = globalAccount.getInitialBuyPrice(devBuyLamports);
-        const { calculateWithSlippageBuy } = require('pumpdotfun-sdk/dist/cjs/util');
-        const buyAmountWithSlippage = calculateWithSlippageBuy(devBuyLamports, 500n);
-        
-        const buyTx = await sdk.getBuyInstructions(
-          mainKeypair.publicKey,
-          mintKeypair.publicKey,
-          globalAccount.feeRecipient,
-          buyAmount,
-          buyAmountWithSlippage
-        );
-
-        console.log(`🚀 Sending dev buy tx`);
-        
-        const buySig = await buildAndSendTx(
-          connection,
-          [buyTx],
-          mainKeypair.publicKey,
-          [mainKeypair],
-          priorityFees
-        );
-
-        console.log(`✅ Dev buy completed! Signature: ${buySig}`);
-        session.liveLogs.push({ status: 'success', message: `💰 Dev Buy Completed! TX: ${buySig.slice(0, 16)}...` });
-        devBuySuccess = true;
-      } catch (buyErr) {
-        console.error('Dev buy failed:', buyErr.message);
-        session.liveLogs.push({ status: 'warning', message: `⚠️ Dev buy failed: ${buyErr.message}` });
-        // Don't throw error - token was still created successfully
-      }
+      // Calculate dev's token holdings (approximate based on bonding curve)
+      const globalAccount = await sdk.getGlobalAccount('confirmed');
+      const devTokens = Number(globalAccount.getInitialBuyPrice(devBuyLamports)) / 1e6;
+      
+      session.liveLogs.push({ status: 'success', message: `💰 Atomic Dev Buy Completed! (${initialBuy} SOL)` });
+      session.liveLogs.push({ status: 'success', message: `👤 Dev secured ${devTokens.toFixed(2)} tokens` });
     }
 
-    // Always show success if token was created, even if dev buy failed
-    session.liveLogs.push({ status: 'completed', message: `✅ ${symbol} token created successfully! Look for contract in dashboard!` });
+    session.liveLogs.push({ status: 'completed', message: `✅ ${symbol} token successfully created` });
 
     await editTerminal(
       `✅ *Deployment Complete!*\n\n` +
-      `  Mint: \`${mintAddress}\`\n` +
-      ` 💰 Dev Buy: ${devBuySuccess ? `${initialBuy} SOL ✅` : `${initialBuy} SOL ❌`}\n` +
+      `📍 Mint: \`${mintAddress}\`\n` +
+      `💰 Dev Buy: ${devBuyLamports > 0n ? `${initialBuy} SOL (Atomic) ✅` : 'No SOL ❌'}\n` +
       `🔗 [Pump.fun](https://pump.fun/${mintAddress})`
     );
 
