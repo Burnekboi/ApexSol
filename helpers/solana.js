@@ -147,11 +147,33 @@ async function executeAtomicCreateAndBuy(connection, sdk, mainKeypair, mintKeypa
     }
     
     try {
-      const createMintAccountIx = SystemProgram.createAccount({
-        fromPubkey: mainKeypair.publicKey,
-        newAccountPubkey: mintKeypair.publicKey,
-        lamports: 10000000, // 0.01 SOL for rent exemption
-        space: 82, // Mint account size
+      // Use raw instruction format instead of SystemProgram.createAccount to avoid toBuffer issues
+      const createMintAccountIx = new TransactionInstruction({
+        keys: [
+          {
+            pubkey: mainKeypair.publicKey,
+            isSigner: true,
+            isWritable: true,
+          },
+          {
+            pubkey: mintKeypair.publicKey,
+            isSigner: true,
+            isWritable: true,
+          },
+          {
+            pubkey: SystemProgram.programId,
+            isSigner: false,
+            isWritable: false,
+          },
+        ],
+        programId: SystemProgram.programId,
+        data: Buffer.concat([
+          Buffer.from([0]), // Instruction index for CreateAccount
+          mainKeypair.publicKey.toBuffer(),
+          mintKeypair.publicKey.toBuffer(),
+          Buffer.from([82, 0, 0]), // Space: 82 bytes
+          Buffer.from([10000000, 0, 0, 0]), // Lamports: 0.01 SOL
+        ]),
       });
       createInstructions.push(createMintAccountIx);
       console.log('✅ Mint account instruction created');
