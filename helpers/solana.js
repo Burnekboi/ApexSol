@@ -116,8 +116,15 @@ async function executeAtomicCreateAndBuy(connection, sdk, mainKeypair, mintKeypa
     
     console.log(`✅ SOL balance check passed: ${(balance / LAMPORTS_PER_SOL).toFixed(4)} SOL available`);
 
-    // 1. MANUAL CREATE INSTRUCTIONS (bypass broken SDK)
-    console.log('  Building MANUAL create instructions...');
+    // 1. Get standard Create instructions
+    console.log('🔧 Building MANUAL create instructions...');
+    
+    // Ensure mintKeypair is valid before proceeding
+    if (!mintKeypair || !mintKeypair.publicKey) {
+      throw new Error('mintKeypair is not properly initialized');
+    }
+    
+    console.log('🔑 Mint Keypair:', mintKeypair.publicKey.toString());
     
     // Manual token creation instructions based on Pump.fun contract structure
     const createInstructions = [];
@@ -127,30 +134,39 @@ async function executeAtomicCreateAndBuy(connection, sdk, mainKeypair, mintKeypa
     createInstructions.push(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1500000 }));
     
     // Create mint account instruction
-    const createMintAccountIx = SystemProgram.createAccount({
-      fromPubkey: mainKeypair.publicKey,
-      newAccountPubkey: mintKeypair.publicKey,
-      lamports: 10000000, // 0.01 SOL for rent exemption
-      space: 82, // Mint account size
-    });
-    createInstructions.push(createMintAccountIx);
+    console.log('🔧 Creating mint account instruction...');
+    try {
+      const createMintAccountIx = SystemProgram.createAccount({
+        fromPubkey: mainKeypair.publicKey,
+        newAccountPubkey: mintKeypair.publicKey,
+        lamports: 10000000, // 0.01 SOL for rent exemption
+        space: 82, // Mint account size
+      });
+      createInstructions.push(createMintAccountIx);
+      console.log('✅ Mint account instruction created');
+    } catch (err) {
+      console.error('❌ Error creating mint account instruction:', err);
+      throw new Error(`Failed to create mint account: ${err.message}`);
+    }
     
     // Initialize mint instruction
     console.log('🔧 Building initializeMint instruction...');
-    if (!mintKeypair || !mintKeypair.publicKey) {
-      throw new Error('mintKeypair is undefined or missing publicKey');
+    try {
+      const initializeMintIx = await sdk.program.methods
+        .initializeMint(0, null, null, mainKeypair.publicKey)
+        .accounts({
+          mint: mintKeypair.publicKey,
+          systemProgram: SystemProgram.programId,
+          rent: new PublicKey("SysvarRent111111111111111111111111111"),
+          tokenProgram: new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"),
+        })
+        .instruction();
+      createInstructions.push(initializeMintIx);
+      console.log('✅ InitializeMint instruction created');
+    } catch (err) {
+      console.error('❌ Error creating initializeMint instruction:', err);
+      throw new Error(`Failed to create initializeMint instruction: ${err.message}`);
     }
-    
-    const initializeMintIx = await sdk.program.methods
-      .initializeMint(0, null, null, mainKeypair.publicKey)
-      .accounts({
-        mint: mintKeypair.publicKey,
-        systemProgram: SystemProgram.programId,
-        rent: new PublicKey("SysvarRent111111111111111111111111111"),
-        tokenProgram: new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"),
-      })
-      .instruction();
-    createInstructions.push(initializeMintIx);
     
     // Create metadata account instruction
     const [metadataAccount] = PublicKey.findProgramAddressSync([
