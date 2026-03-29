@@ -1,20 +1,20 @@
+const web3 = require("@solana/web3.js");
+const { 
+  PublicKey, 
+  Connection, 
+  Keypair, 
+  TransactionMessage, 
+  VersionedTransaction, 
+  SystemProgram, 
+  LAMPORTS_PER_SOL, 
+  ComputeBudgetProgram 
+} = web3;
+const anchor = require("@coral-xyz/anchor");
+const { getAssociatedTokenAddressSync } = require("@solana/spl-token");
 const axios = require('axios');
 const FormData = require('form-data');
 const { PumpFunSDK } = require('pumpdotfun-sdk');
 const { AnchorProvider } = require('@coral-xyz/anchor');
-
-const {
-  PublicKey,
-  LAMPORTS_PER_SOL,
-  Transaction,
-  Keypair,
-  Connection,
-  SendTransactionError,
-  ComputeBudgetProgram,
-  TransactionMessage,
-  VersionedTransaction,
-  SystemProgram
-} = require('@solana/web3.js');
 
 const { base58Decode, base58Encode } = require('../utils/base58');
 
@@ -101,8 +101,8 @@ async function buildAndSendTx(connection, instructions, payer, signers, priority
  */
 async function executeAtomicCreateAndBuy(connection, sdk, mainKeypair, mintKeypair, tokenName, symbol, metadataUri, initialBuySol) {
   try {
+    const PUMP_PROGRAM = new PublicKey('6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P');
     const devBuyLamports = BigInt(Math.floor(initialBuySol * LAMPORTS_PER_SOL));
-    const PUMP_PROGRAM_ID = new PublicKey('6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P');
 
     // 0. Check SOL balance first
     const balance = await connection.getBalance(mainKeypair.publicKey);
@@ -115,7 +115,7 @@ async function executeAtomicCreateAndBuy(connection, sdk, mainKeypair, mintKeypa
     
     console.log(`✅ SOL balance check passed: ${(balance / LAMPORTS_PER_SOL).toFixed(4)} SOL available`);
 
-    // 1. Get Create Instructions
+    // 1. Get standard Create instructions
     const createIxs = await sdk.getCreateInstructions(
       mainKeypair.publicKey,
       tokenName,
@@ -124,95 +124,79 @@ async function executeAtomicCreateAndBuy(connection, sdk, mainKeypair, mintKeypa
       mintKeypair
     );
 
-    // 2. Setup Buy Parameters
+    // 2. Prepare Buy Instruction (Manual Construction)
     const globalAccount = await sdk.getGlobalAccount('confirmed');
     const buyAmount = globalAccount.getInitialBuyPrice(devBuyLamports);
-    // 5% Slippage
-    const buyAmountWithSlippage = buyAmount + (buyAmount * 500n / 10000n); 
+    const buyAmountWithSlippage = buyAmount + (buyAmount * 500n / 10000n); // 5% slippage
 
-    // 3. MANUALLY build the Buy Instruction to fix SDK bug
-    const { getAssociatedTokenAddressSync } = require('@solana/spl-token');
-    const { BN } = require('bn.js');
+    const [bondingCurve] = PublicKey.findProgramAddressSync([Buffer.from("bonding-curve"), mintKeypair.publicKey.toBuffer()], PUMP_PROGRAM);
+    const [associatedBondingCurve] = PublicKey.findProgramAddressSync(
+        [bondingCurve.toBuffer(), new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA").toBuffer(), mintKeypair.publicKey.toBuffer()],
+        new PublicKey("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL")
+    );
+    const userATA = getAssociatedTokenAddressSync(mintKeypair.publicKey, mainKeypair.publicKey);
     
-    const associatedTokenAccount = getAssociatedTokenAddressSync(mintKeypair.publicKey, mainKeypair.publicKey);
-
-    // Get Bonding Curve addresses
-    const [bondingCurve] = PublicKey.findProgramAddressSync([Buffer.from("bonding-curve"), mintKeypair.publicKey.toBuffer()], PUMP_PROGRAM_ID);
-    const [associatedBondingCurve] = PublicKey.findProgramAddressSync([bondingCurve.toBuffer(), new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA").toBuffer(), mintKeypair.publicKey.toBuffer()], new PublicKey("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"));
-    const [globalVolumeAccumulator] = PublicKey.findProgramAddressSync([Buffer.from('global_volume_accumulator')], PUMP_PROGRAM_ID);
+    // THE FIX: Define 13th account
+    const [globalVolumeAccumulator] = PublicKey.findProgramAddressSync([Buffer.from('global_volume_accumulator')], PUMP_PROGRAM);
 
     console.log(`🔧 Bonding Curve: ${bondingCurve.toString()}`);
     console.log(`🔧 Global Volume Accumulator: ${globalVolumeAccumulator.toString()}`);
 
-    // This is the manual instruction that fixes "AccountNotEnoughKeys"
     const buyIx = await sdk.program.methods
-      .buy(new BN(buyAmount.toString()), new BN(buyAmountWithSlippage.toString()))
+      .buy(new anchor.BN(buyAmount.toString()), new anchor.BN(buyAmountWithSlippage.toString()))
       .accounts({
         global: new PublicKey("4wTV1YmiEkRvAtNtsSGPtUrqRYQMe5SKy2uB4Jjaxnjf"),
         feeRecipient: new PublicKey("62qc2CNXwrYqQScmEdiZFFAnJR262PxWEuNQtxfafNgV"),
         mint: mintKeypair.publicKey,
         bondingCurve: bondingCurve,
         associatedBondingCurve: associatedBondingCurve,
-        associatedUser: associatedTokenAccount,
+        associatedUser: userATA,
         user: mainKeypair.publicKey,
         systemProgram: SystemProgram.programId,
         tokenProgram: new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"),
         rent: new PublicKey("SysvarRent111111111111111111111111111111111"),
         eventAuthority: new PublicKey("Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasjjnr7XxXp9F1"),
-        program: PUMP_PROGRAM_ID,
+        program: PUMP_PROGRAM,
       })
       .remainingAccounts([
-        { pubkey: globalVolumeAccumulator, isSigner: false, isWritable: true } // THE 13th KEY
+        { pubkey: globalVolumeAccumulator, isSigner: false, isWritable: true }
       ])
       .instruction();
 
-    // 4. Jito Tip using multiple accounts for better distribution
-    const tipAddresses = [
-      "3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPdSSdeBnizKZ6jT",
-      "96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5",
-      "DttWaMuVvTiduZRnguLF7jNxTgiMBZ1hyAumKUiL2KRL",
-      "ADuUkR4vqLUMWXxW9gh6D6L8pMSawimctcNZ5pGwDcEt",
-      "HFqU5x63VTqvQss8hp11i4wVV8bD44PvwucfZ2bU7gRe",
-      "ADaUMid9yfUytqMBgopwjb2DTLSokTSzL1zt6iGPaS49",
-      "DfXygSm4jCyNCybVYYK6DwvWqjKee8pbDmJGcLWNDXjh",
-      "Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvLkY"
-    ];
-    
-    const randomTipAccount = new PublicKey(tipAddresses[Math.floor(Math.random() * tipAddresses.length)]);
-    const tipAmount = 2000000; // 0.002 SOL tip
-    
+    // 3. Jito Tip (Targeting a reliable tip account)
     const tipIx = SystemProgram.transfer({
       fromPubkey: mainKeypair.publicKey,
-      toPubkey: randomTipAccount,
-      lamports: tipAmount,
+      toPubkey: new PublicKey("Cw8CFyMvGrnCqR8FdiRLS9nEbEEDrgfM9az8LqCacHPy"),
+      lamports: 1000000, // 0.001 SOL
     });
 
-    // 5. Combine everything into ONE atomic transaction
+    // 4. Combine all instructions - handle single instruction vs array
+    const createInstructionsArray = Array.isArray(createIxs) ? createIxs : [createIxs];
+    
     const allInstructions = [
-      ComputeBudgetProgram.setComputeUnitLimit({ units: 1_000_000 }),
-      ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1_000_000 }),
-      ...createIxs,
+      ComputeBudgetProgram.setComputeUnitLimit({ units: 800000 }),
+      ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1500000 }),
+      ...createInstructionsArray,
       buyIx,
       tipIx
     ];
 
-    console.log(`🚀 Sending Fixed Atomic Transaction with ${allInstructions.length} instructions...`);
-    console.log(`💰 Using Jito tip account: ${randomTipAccount.toString()}`);
+    console.log(`🚀 Sending Atomic Bundle with ${allInstructions.length} instructions...`);
     
-    const bundleResult = await sendJitoBundle({
+    const result = await sendJitoBundle({
       payer: mainKeypair,
       instructions: allInstructions,
       connection: connection,
       additionalSigners: [mintKeypair]
     });
 
-    if (!bundleResult.success) throw new Error(bundleResult.error);
+    if (!result.success) throw new Error(result.error);
     
-    console.log(`✅ Atomic transaction successful: ${bundleResult.signature}`);
-    return bundleResult.signature;
-    
+    console.log(`✅ Atomic transaction successful: ${result.signature}`);
+    return result.signature;
+
   } catch (err) {
-    console.error('Atomic create+buy error:', err);
+    console.error("Atomic Error Detail:", err);
     throw new Error(handleTransactionError(err));
   }
 }
