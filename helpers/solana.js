@@ -205,12 +205,12 @@ async function executeAtomicCreateAndBuy(connection, sdk, mainKeypair, mintKeypa
             isWritable: true,
           },
           {
-            pubkey: SystemProgram.programId,
+            pubkey: new PublicKey("11111111111111111111111111111111"), // System Program
             isSigner: false,
             isWritable: false,
           },
           {
-            pubkey: new PublicKey("SysvarRent111111111111111111111111111"),
+            pubkey: new PublicKey("SysvarRent111111111111111111111111111111111"),
             isSigner: false,
             isWritable: false,
           },
