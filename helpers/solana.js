@@ -98,31 +98,65 @@ async function buildAndSendTx(connection, instructions, payer, signers, priority
  * 📦 JITO BUNDLE ATOMIC TRANSACTIONS
  * ===============================
  */
-async function sendJitoBundle(transactions) {
-  try {
-    const bundle = transactions.map(tx => tx.toString('base64'));
-    
-    const response = await axios.post('https://mainnet.block-engine.jito.wtf/api/v1/bundles', {
-      jsonrpc: '2.0',
-      id: 1,
-      method: 'sendBundle',
-      params: [bundle]
-    }, {
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      timeout: 30000
-    });
+async function sendJitoBundle(transactions, maxRetries = 3) {
+  let lastError;
+  
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const bundle = transactions.map(tx => tx.toString('base64'));
+      
+      // Add delay between retries to respect rate limits
+      if (attempt > 1) {
+        const delay = Math.min(1000 * Math.pow(2, attempt - 1), 10000); // Max 10s
+        console.log(`🔄 Jito retry ${attempt}/${maxRetries} after ${delay}ms delay...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+      
+      const response = await axios.post('https://mainnet.block-engine.jito.wtf/api/v1/bundles', {
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'sendBundle',
+        params: [bundle]
+      }, {
+        headers: {
+          'Content-Type': 'application/json',
+          'User-Agent': 'Cucumverse-Bot/1.0'
+        },
+        timeout: 30000
+      });
 
-    if (response.data.error) {
-      throw new Error(`Jito bundle error: ${response.data.error.message}`);
+      if (response.data.error) {
+        throw new Error(`Jito bundle error: ${response.data.error.message}`);
+      }
+
+      console.log(`✅ Jito bundle sent successfully on attempt ${attempt}`);
+      return response.data.result;
+      
+    } catch (err) {
+      lastError = err;
+      
+      // Handle rate limiting specifically
+      if (err.response?.status === 429) {
+        const retryAfter = err.response.headers['retry-after'];
+        const waitTime = retryAfter ? parseInt(retryAfter) * 1000 : 5000;
+        
+        console.warn(`⚠️ Jito rate limit hit (429). Waiting ${waitTime}ms before retry...`);
+        
+        if (attempt < maxRetries) {
+          await new Promise(resolve => setTimeout(resolve, waitTime));
+          continue;
+        }
+      }
+      
+      console.error(`Jito bundle attempt ${attempt} failed:`, err.message);
+      
+      if (attempt === maxRetries) {
+        throw lastError;
+      }
     }
-
-    return response.data.result;
-  } catch (err) {
-    console.error('Jito bundle error:', err.message);
-    throw err;
   }
+  
+  throw lastError;
 }
 
 /**
@@ -143,6 +177,20 @@ function handleTransactionError(err) {
     
     return `Transaction failed: ${err.message}\nLogs: ${logs.join('\n')}`;
   }
+  
+  // Handle Jito-specific errors
+  if (err.response?.status === 429) {
+    return 'Jito rate limit exceeded. Please try again in a few moments. The system will automatically retry.';
+  }
+  
+  if (err.response?.status >= 400) {
+    return `Jito API error (${err.response.status}): ${err.response.statusText || 'Unknown error'}`;
+  }
+  
+  if (err.message?.includes('Jito')) {
+    return `Jito bundle error: ${err.message}`;
+  }
+  
   return err.message;
 }
 
@@ -409,10 +457,19 @@ async function handleDeployRequest(bot, connection, data, chatId, session, termM
       } catch (bundleErr) {
         console.error('Jito bundle failed, falling back to legacy method:', bundleErr.message);
         
+        // Check if it's a rate limit error - if so, wait a bit before fallback
+        if (bundleErr.response?.status === 429 || bundleErr.message?.includes('rate limit')) {
+          session.liveLogs.push({
+            status: 'processing',
+            message: `⚠️ Jito rate limited. Waiting 10s before fallback...`
+          });
+          await new Promise(resolve => setTimeout(resolve, 10000));
+        }
+        
         // Fallback to legacy method if Jito fails
         session.liveLogs.push({
           status: 'processing',
-          message: `⚠️ Jito bundle failed, trying legacy method...`
+          message: `⚠️ Jito bundle failed, using legacy atomic method...`
         });
         
         // Legacy method (current implementation)
