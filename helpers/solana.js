@@ -101,7 +101,8 @@ async function buildAndSendTx(connection, instructions, payer, signers, priority
 async function executeAtomicCreateAndBuy(connection, sdk, mainKeypair, mintKeypair, tokenName, symbol, metadataUri, initialBuySol) {
   try {
     const devBuyLamports = BigInt(Math.floor(initialBuySol * LAMPORTS_PER_SOL));
-    
+    const PUMP_PROGRAM_ID = new PublicKey('6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P');
+
     // 0. Check SOL balance first
     const balance = await connection.getBalance(mainKeypair.publicKey);
     const estimatedCost = devBuyLamports + BigInt(20000000); // Buy amount + ~0.02 SOL for fees/tips
@@ -112,7 +113,7 @@ async function executeAtomicCreateAndBuy(connection, sdk, mainKeypair, mintKeypa
     }
     
     console.log(`✅ SOL balance check passed: ${(balance / LAMPORTS_PER_SOL).toFixed(4)} SOL available`);
-    
+
     // 1. Get Create Instructions
     const createIxs = await sdk.getCreateInstructions(
       mainKeypair.publicKey,
@@ -121,77 +122,50 @@ async function executeAtomicCreateAndBuy(connection, sdk, mainKeypair, mintKeypa
       metadataUri,
       mintKeypair
     );
-    
-    // 2. Setup Buy Instructions with Slippage
+
+    // 2. Setup Buy Parameters
     const globalAccount = await sdk.getGlobalAccount('confirmed');
     const buyAmount = globalAccount.getInitialBuyPrice(devBuyLamports);
-    const { calculateWithSlippageBuy } = require('pumpdotfun-sdk/dist/cjs/util');
-    const buyAmountWithSlippage = calculateWithSlippageBuy(devBuyLamports, 500n); // 5% slippage
+    // 5% Slippage
+    const buyAmountWithSlippage = buyAmount + (buyAmount * 500n / 10000n); 
 
-    const buyTx = await sdk.getBuyInstructions(
-      mainKeypair.publicKey,
-      mintKeypair.publicKey,
-      buyAmount,
-      buyAmountWithSlippage
-    );
-
-    // 3. Fix missing global_volume_accumulator key
-    const buyIxs = Array.isArray(buyTx) ? buyTx : [buyTx];
-    buyIxs.forEach((ix, index) => {
-      if (ix.programId.toString() === '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P') {
-        console.log(`🔧 Processing buy instruction ${index + 1}`);
-        console.log(`🔧 Current keys count: ${ix.keys.length}`);
-        
-        // Try different seeds for global_volume_accumulator
-        const possibleSeeds = [
-          ['global_volume_accumulator'],
-          ['global', 'volume', 'accumulator'],
-          Buffer.from('global_volume_accumulator')
-        ];
-        
-        let globalVolumeAccumulator = null;
-        
-        for (const seed of possibleSeeds) {
-          try {
-            const [pda] = PublicKey.findProgramAddressSync(
-              Array.isArray(seed) ? seed : [seed], 
-              new PublicKey('6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P')
-            );
-            globalVolumeAccumulator = pda;
-            console.log(`🔧 PDA found with seed ${JSON.stringify(seed)}: ${pda.toString()}`);
-            break;
-          } catch (e) {
-            console.log(`❌ Seed ${JSON.stringify(seed)} failed: ${e.message}`);
-          }
-        }
-        
-        if (!globalVolumeAccumulator) {
-          throw new Error('Could not find global_volume_accumulator PDA with any seed pattern');
-        }
-        
-        // Check if global_volume_accumulator is already present
-        const hasAccumulator = ix.keys.some(k => k.pubkey.toString() === globalVolumeAccumulator.toString());
-        
-        if (!hasAccumulator) {
-          console.log('🔧 Adding missing global_volume_accumulator key to buy instruction');
-          ix.keys.push({ pubkey: globalVolumeAccumulator, isSigner: false, isWritable: true });
-          console.log(`🔧 Added key. Total keys now: ${ix.keys.length}`);
-        } else {
-          console.log('✅ global_volume_accumulator key already present');
-        }
-        
-        // Log all keys for debugging
-        console.log('🔧 All instruction keys:');
-        ix.keys.forEach((key, i) => {
-          console.log(`  ${i}: ${key.pubkey.toString()} (signer: ${key.isSigner}, writable: ${key.isWritable})`);
-        });
-      }
-    });
-
-    // 4. Build proper priority fee and Jito tip using multiple tip accounts
-    const priorityFee = 1000000; // 0.001 SOL priority fee
+    // 3. MANUALLY build the Buy Instruction to fix SDK bug
+    const { getAssociatedTokenAddressSync } = require('@solana/spl-token');
+    const { BN } = require('bn.js');
     
-    // Random Jito tip account selection for better distribution
+    const associatedTokenAccount = getAssociatedTokenAddressSync(mintKeypair.publicKey, mainKeypair.publicKey);
+
+    // Get Bonding Curve addresses
+    const [bondingCurve] = PublicKey.findProgramAddressSync([Buffer.from("bonding-curve"), mintKeypair.publicKey.toBuffer()], PUMP_PROGRAM_ID);
+    const [associatedBondingCurve] = PublicKey.findProgramAddressSync([bondingCurve.toBuffer(), new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA").toBuffer(), mintKeypair.publicKey.toBuffer()], new PublicKey("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"));
+    const [globalVolumeAccumulator] = PublicKey.findProgramAddressSync([Buffer.from('global_volume_accumulator')], PUMP_PROGRAM_ID);
+
+    console.log(`🔧 Bonding Curve: ${bondingCurve.toString()}`);
+    console.log(`🔧 Global Volume Accumulator: ${globalVolumeAccumulator.toString()}`);
+
+    // This is the manual instruction that fixes "AccountNotEnoughKeys"
+    const buyIx = await sdk.program.methods
+      .buy(new BN(buyAmount.toString()), new BN(buyAmountWithSlippage.toString()))
+      .accounts({
+        global: new PublicKey("4wTV1YmiEkRvAtNtsSGPtUrqRYQMe5SKy2uB4Jjaxnjf"),
+        feeRecipient: new PublicKey("62qc2CNXwrYqQScmEdiZFFAnJR262PxWEuNQtxfafNgV"),
+        mint: mintKeypair.publicKey,
+        bondingCurve: bondingCurve,
+        associatedBondingCurve: associatedBondingCurve,
+        associatedUser: associatedTokenAccount,
+        user: mainKeypair.publicKey,
+        systemProgram: SystemProgram.programId,
+        tokenProgram: new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"),
+        rent: new PublicKey("SysvarRent111111111111111111111111111111111"),
+        eventAuthority: new PublicKey("Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasjjnr7XxXp9F1"),
+        program: PUMP_PROGRAM_ID,
+      })
+      .remainingAccounts([
+        { pubkey: globalVolumeAccumulator, isSigner: false, isWritable: true } // THE 13th KEY
+      ])
+      .instruction();
+
+    // 4. Jito Tip using multiple accounts for better distribution
     const tipAddresses = [
       "3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPdSSdeBnizKZ6jT",
       "96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5",
@@ -211,20 +185,18 @@ async function executeAtomicCreateAndBuy(connection, sdk, mainKeypair, mintKeypa
       toPubkey: randomTipAccount,
       lamports: tipAmount,
     });
-    
-    console.log(`💰 Using Jito tip account: ${randomTipAccount.toString()}`);
 
     // 5. Combine everything into ONE atomic transaction
     const allInstructions = [
-      ComputeBudgetProgram.setComputeUnitLimit({ units: 1_000_000 }), // Higher limit for complex tx
-      ComputeBudgetProgram.setComputeUnitPrice({ microLamports: priorityFee }),
+      ComputeBudgetProgram.setComputeUnitLimit({ units: 1_000_000 }),
+      ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1_000_000 }),
       ...createIxs,
-      ...buyIxs,
+      buyIx,
       tipIx
     ];
 
-    console.log(`🚀 Sending atomic transaction with ${allInstructions.length} instructions...`);
-    console.log(`💰 Priority fee: ${priorityFee} microLamports, Jito tip: ${tipAmount / LAMPORTS_PER_SOL} SOL`);
+    console.log(`🚀 Sending Fixed Atomic Transaction with ${allInstructions.length} instructions...`);
+    console.log(`💰 Using Jito tip account: ${randomTipAccount.toString()}`);
     
     const bundleResult = await sendJitoBundle({
       payer: mainKeypair,
