@@ -812,7 +812,6 @@ async function sellTokenAmount(bot, connection, buyer, sellAmount, contractAddre
 async function buildBuyInstruction(connection, userPublicKey, mint, tokenAmount, maxSolCost) {
   const { PumpFunSDK } = require('pumpdotfun-sdk');
   const { AnchorProvider } = require('@coral-xyz/anchor');
-  const { getAssociatedTokenAddress, createAssociatedTokenAccountInstruction, getAccount } = require('@solana/spl-token');
   
   // Create a dummy provider for SDK usage
   const dummyWallet = {
@@ -825,122 +824,28 @@ async function buildBuyInstruction(connection, userPublicKey, mint, tokenAmount,
   const sdk = new PumpFunSDK(provider);
   
   try {
-    // Get required accounts
+    // Get the global account for fee recipient
     const globalAccount = await sdk.getGlobalAccount('confirmed');
-    const bondingCurvePDA = sdk.getBondingCurvePDA(mint);
-    const associatedBondingCurve = await getAssociatedTokenAddress(mint, bondingCurvePDA, true);
-    const associatedUser = await getAssociatedTokenAddress(mint, userPublicKey, false);
     
-    // Get global PDA
-    const [globalPDA] = PublicKey.findProgramAddressSync(
-      [Buffer.from('global')], 
-      new PublicKey('6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P')
-    );
-    
-    // Get global volume accumulator PDA
-    const [globalVolumeAccumulator] = PublicKey.findProgramAddressSync(
-      [Buffer.from('global_volume_accumulator')], 
-      new PublicKey('6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P')
-    );
-    
-    // Debug: Log all accounts to identify invalid ones
-    console.log('🔍 Debug - Account validation:');
+    console.log('🔍 Debug - Using SDK getBuyInstructions with global account');
     console.log('userPublicKey:', userPublicKey?.toString());
     console.log('mint:', mint?.toString());
     console.log('globalAccount.feeRecipient:', globalAccount.feeRecipient?.toString());
-    console.log('bondingCurvePDA:', bondingCurvePDA?.toString());
-    console.log('associatedBondingCurve:', associatedBondingCurve?.toString());
-    console.log('associatedUser:', associatedUser?.toString());
-    console.log('globalPDA:', globalPDA?.toString());
-    console.log('globalVolumeAccumulator:', globalVolumeAccumulator?.toString());
+    console.log('tokenAmount:', tokenAmount?.toString());
+    console.log('maxSolCost:', maxSolCost?.toString());
     
-    // Validate all accounts before proceeding
-    const accounts = {
-      globalPDA,
-      feeRecipient: globalAccount.feeRecipient,
+    // Use the SDK's getBuyInstructions method which should handle all required accounts
+    const buyTx = await sdk.getBuyInstructions(
+      userPublicKey,
       mint,
-      bondingCurve: bondingCurvePDA,
-      associatedBondingCurve,
-      associatedUser,
-      user: userPublicKey,
-      globalVolumeAccumulator // ✅ CRITICAL: Missing account
-    };
+      globalAccount.feeRecipient,
+      tokenAmount,
+      maxSolCost
+    );
     
-    for (const [name, account] of Object.entries(accounts)) {
-      if (!account || typeof account.toString !== 'function') {
-        throw new Error(`Invalid account: ${name} - ${account}`);
-      }
-      try {
-        new PublicKey(account.toString());
-      } catch (e) {
-        throw new Error(`Invalid public key for ${name}: ${account?.toString()} - ${e.message}`);
-      }
-    }
+    console.log('✅ SDK buy instruction created successfully');
+    return buyTx;
     
-    // Build transaction with all required accounts
-    const transaction = new Transaction();
-    
-    // Add ATA creation if needed - use proper getAccount check
-    try {
-      await getAccount(connection, associatedUser, 'confirmed');
-      console.log('ATA already exists for user');
-    } catch (e) {
-      console.log('Creating ATA for user');
-      transaction.add(createAssociatedTokenAccountInstruction(
-        userPublicKey,
-        associatedUser,
-        userPublicKey,
-        mint
-      ));
-    }
-    
-    // Add the buy instruction with all required accounts from IDL
-    console.log('🔍 Debug - Creating PublicKey objects:');
-    
-    try {
-      const systemProgram = new PublicKey('11111111111111111111111111111111');
-      console.log('✅ systemProgram created');
-      
-      const tokenProgram = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
-      console.log('✅ tokenProgram created');
-      
-      // Use proper rent sysvar constant
-      const { SYSVAR_RENT_PUBKEY } = require('@solana/web3.js');
-      const rent = SYSVAR_RENT_PUBKEY;
-      console.log('✅ rent created:', rent.toString());
-      
-      const eventAuthority = new PublicKey('Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasjjnr7XxXp9F1');
-      console.log('✅ eventAuthority created');
-      
-      const program = new PublicKey('6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P');
-      console.log('✅ program created');
-      
-      transaction.add(await sdk.program.methods
-        .buy(new (require('bn.js').BN)(tokenAmount.toString()), new (require('bn.js').BN)(maxSolCost.toString()))
-        .accounts({
-          global: globalPDA,                           // ✅ Required global account
-          feeRecipient: globalAccount.feeRecipient,
-          mint: mint,
-          bondingCurve: bondingCurvePDA,
-          associatedBondingCurve: associatedBondingCurve,
-          associatedUser: associatedUser,
-          user: userPublicKey,
-          globalVolumeAccumulator: globalVolumeAccumulator, // ✅ CRITICAL: Missing account
-          systemProgram: systemProgram,
-          tokenProgram: tokenProgram,
-          rent: rent,
-          eventAuthority: eventAuthority,
-          program: program
-        })
-        .transaction());
-        
-    } catch (pubkeyErr) {
-      console.error('❌ PublicKey creation failed:', pubkeyErr.message);
-      console.error('❌ Error details:', pubkeyErr);
-      throw pubkeyErr;
-    }
-    
-    return transaction;
   } catch (err) {
     console.error('buildBuyInstruction error:', err.message);
     throw err;
