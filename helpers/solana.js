@@ -135,6 +135,17 @@ async function executeAtomicCreateAndBuy(connection, sdk, mainKeypair, mintKeypa
     
     // Create mint account instruction
     console.log('🔧 Creating mint account instruction...');
+    console.log('🔍 Debug - mintKeypair before createAccount:', {
+      exists: !!mintKeypair,
+      hasPublicKey: !!mintKeypair?.publicKey,
+      publicKeyString: mintKeypair?.publicKey?.toString() || 'undefined',
+      hasToBuffer: !!mintKeypair?.publicKey?.toBuffer
+    });
+    
+    if (!mintKeypair || !mintKeypair.publicKey) {
+      throw new Error('mintKeypair is not properly initialized');
+    }
+    
     try {
       const createMintAccountIx = SystemProgram.createAccount({
         fromPubkey: mainKeypair.publicKey,
@@ -146,6 +157,11 @@ async function executeAtomicCreateAndBuy(connection, sdk, mainKeypair, mintKeypa
       console.log('✅ Mint account instruction created');
     } catch (err) {
       console.error('❌ Error creating mint account instruction:', err);
+      console.error('❌ MintKeypair details at error time:', {
+        exists: !!mintKeypair,
+        hasPublicKey: !!mintKeypair?.publicKey,
+        publicKeyString: mintKeypair?.publicKey?.toString() || 'undefined'
+      });
       throw new Error(`Failed to create mint account: ${err.message}`);
     }
     
