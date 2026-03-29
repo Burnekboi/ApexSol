@@ -137,12 +137,37 @@ async function executeAtomicCreateAndBuy(connection, sdk, mainKeypair, mintKeypa
 
     // 3. Fix missing global_volume_accumulator key
     const buyIxs = Array.isArray(buyTx) ? buyTx : [buyTx];
-    buyIxs.forEach(ix => {
+    buyIxs.forEach((ix, index) => {
       if (ix.programId.toString() === '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P') {
-        const [globalVolumeAccumulator] = PublicKey.findProgramAddressSync(
-          [Buffer.from('global_volume_accumulator')], 
-          ix.programId
-        );
+        console.log(`🔧 Processing buy instruction ${index + 1}`);
+        console.log(`🔧 Current keys count: ${ix.keys.length}`);
+        
+        // Try different seeds for global_volume_accumulator
+        const possibleSeeds = [
+          ['global_volume_accumulator'],
+          ['global', 'volume', 'accumulator'],
+          Buffer.from('global_volume_accumulator')
+        ];
+        
+        let globalVolumeAccumulator = null;
+        
+        for (const seed of possibleSeeds) {
+          try {
+            const [pda] = PublicKey.findProgramAddressSync(
+              Array.isArray(seed) ? seed : [seed], 
+              new PublicKey('6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P')
+            );
+            globalVolumeAccumulator = pda;
+            console.log(`🔧 PDA found with seed ${JSON.stringify(seed)}: ${pda.toString()}`);
+            break;
+          } catch (e) {
+            console.log(`❌ Seed ${JSON.stringify(seed)} failed: ${e.message}`);
+          }
+        }
+        
+        if (!globalVolumeAccumulator) {
+          throw new Error('Could not find global_volume_accumulator PDA with any seed pattern');
+        }
         
         // Check if global_volume_accumulator is already present
         const hasAccumulator = ix.keys.some(k => k.pubkey.toString() === globalVolumeAccumulator.toString());
@@ -150,24 +175,44 @@ async function executeAtomicCreateAndBuy(connection, sdk, mainKeypair, mintKeypa
         if (!hasAccumulator) {
           console.log('🔧 Adding missing global_volume_accumulator key to buy instruction');
           ix.keys.push({ pubkey: globalVolumeAccumulator, isSigner: false, isWritable: true });
+          console.log(`🔧 Added key. Total keys now: ${ix.keys.length}`);
+        } else {
+          console.log('✅ global_volume_accumulator key already present');
         }
+        
+        // Log all keys for debugging
+        console.log('🔧 All instruction keys:');
+        ix.keys.forEach((key, i) => {
+          console.log(`  ${i}: ${key.pubkey.toString()} (signer: ${key.isSigner}, writable: ${key.isWritable})`);
+        });
       }
     });
 
-    // 4. Build proper priority fee and Jito tip
-    // Get current priority fee recommendation
-    const { FeeCalculator } = await connection.getRecentPerformanceSamples();
+    // 4. Build proper priority fee and Jito tip using multiple tip accounts
     const priorityFee = 1000000; // 0.001 SOL priority fee
     
-    // Jito tip for bundle inclusion
-    const jitoTipAccount = new PublicKey("96gYZGLnJYVFmbjzopSsQVThGqhWtqoFPMPw7sCwgqAY"); // Valid Jito tip account
+    // Random Jito tip account selection for better distribution
+    const tipAddresses = [
+      "3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPdSSdeBnizKZ6jT",
+      "96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5",
+      "DttWaMuVvTiduZRnguLF7jNxTgiMBZ1hyAumKUiL2KRL",
+      "ADuUkR4vqLUMWXxW9gh6D6L8pMSawimctcNZ5pGwDcEt",
+      "HFqU5x63VTqvQss8hp11i4wVV8bD44PvwucfZ2bU7gRe",
+      "ADaUMid9yfUytqMBgopwjb2DTLSokTSzL1zt6iGPaS49",
+      "DfXygSm4jCyNCybVYYK6DwvWqjKee8pbDmJGcLWNDXjh",
+      "Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvLkY"
+    ];
+    
+    const randomTipAccount = new PublicKey(tipAddresses[Math.floor(Math.random() * tipAddresses.length)]);
     const tipAmount = 2000000; // 0.002 SOL tip
     
     const tipIx = SystemProgram.transfer({
       fromPubkey: mainKeypair.publicKey,
-      toPubkey: jitoTipAccount,
+      toPubkey: randomTipAccount,
       lamports: tipAmount,
     });
+    
+    console.log(`💰 Using Jito tip account: ${randomTipAccount.toString()}`);
 
     // 5. Combine everything into ONE atomic transaction
     const allInstructions = [
@@ -218,14 +263,37 @@ async function sendJitoBundle({ payer, instructions, connection, additionalSigne
 
       const serializedTx = Buffer.from(tx.serialize()).toString("base64");
 
-      const response = await axios.post('https://mainnet.block-engine.jito.wtf/api/v1/bundles', {
-        jsonrpc: '2.0', id: 1, method: 'sendBundle', params: [[serializedTx]]
+      // Use proper Jito bundle format with ny endpoint
+      const body = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "sendBundle",
+        "params": [
+          [serializedTx],
+          {
+            "encoding": "base64"
+          }
+        ]
+      };
+
+      const response = await fetch('https://ny.mainnet.block-engine.jito.wtf/api/v1/bundles', {
+        method: 'POST',
+        body: JSON.stringify(body),
+        headers: {
+          'Content-Type': 'application/json'
+        }
       });
 
-      if (response.data.error) throw new Error(response.data.error.message);
+      const json = await response.json();
+      
+      if (json.error) throw new Error(json.error.message);
+      if (!json.result) throw new Error('No result returned from Jito bundle');
 
+      console.log('✅ Bundle sent successfully:', json.result);
       return { success: true, signature: base58Encode(tx.signatures[0]) };
+      
     } catch (err) {
+      console.error(`❌ Bundle attempt ${attempt} failed:`, err.message);
       if (attempt === maxRetries) return { success: false, error: err.message };
       await new Promise(r => setTimeout(r, 2000));
     }
