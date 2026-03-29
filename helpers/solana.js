@@ -8,7 +8,11 @@ const {
   LAMPORTS_PER_SOL,
   Transaction,
   Keypair,
-  Connection
+  Connection,
+  SendTransactionError,
+  ComputeBudgetProgram,
+  TransactionMessage,
+  VersionedTransaction
 } = require('@solana/web3.js');
 
 const { base58Decode, base58Encode } = require('../utils/base58');
@@ -87,6 +91,144 @@ async function buildAndSendTx(connection, instructions, payer, signers, priority
   }
   
   throw lastError;
+}
+
+/**
+ * ===============================
+ * 📦 JITO BUNDLE ATOMIC TRANSACTIONS
+ * ===============================
+ */
+async function sendJitoBundle(transactions) {
+  try {
+    const bundle = transactions.map(tx => tx.toString('base64'));
+    
+    const response = await axios.post('https://mainnet.block-engine.jito.wtf/api/v1/bundles', {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'sendBundle',
+      params: [bundle]
+    }, {
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      timeout: 30000
+    });
+
+    if (response.data.error) {
+      throw new Error(`Jito bundle error: ${response.data.error.message}`);
+    }
+
+    return response.data.result;
+  } catch (err) {
+    console.error('Jito bundle error:', err.message);
+    throw err;
+  }
+}
+
+/**
+ * ===============================
+ * 🚀 ENHANCED ERROR HANDLING
+ * ===============================
+ */
+function handleTransactionError(err) {
+  if (err instanceof SendTransactionError) {
+    const logs = err.getLogs ? err.getLogs() : [];
+    console.error('Transaction logs:', logs);
+    
+    // Look for specific error patterns
+    const logString = logs.join(' ');
+    if (logString.includes('AccountNotEnoughKeys') || logString.includes('global_volume_accumulator')) {
+      return 'Transaction failed: Missing required accounts (global_volume_accumulator). This usually means the SDK version is incompatible or the buy instruction needs additional accounts.';
+    }
+    
+    return `Transaction failed: ${err.message}\nLogs: ${logs.join('\n')}`;
+  }
+  return err.message;
+}
+
+/**
+ * ===============================
+ * 🛒 ATOMIC CREATE + BUY WITH JITO
+ * ===============================
+ */
+async function executeAtomicCreateAndBuy(connection, sdk, mainKeypair, mintKeypair, tokenName, symbol, metadataUri, initialBuySol) {
+  try {
+    const devBuyLamports = BigInt(Math.floor(initialBuySol * LAMPORTS_PER_SOL));
+    
+    // Get fresh blockhash for both transactions
+    const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('confirmed');
+    
+    // Step 1: Create transaction
+    const createTx = await sdk.getCreateInstructions(
+      mainKeypair.publicKey,
+      tokenName,
+      symbol,
+      metadataUri,
+      mintKeypair
+    );
+    
+    // Step 2: Buy transaction with all required accounts
+    const globalAccount = await sdk.getGlobalAccount('confirmed');
+    const buyAmount = globalAccount.getInitialBuyPrice(devBuyLamports);
+    const { calculateWithSlippageBuy } = require('pumpdotfun-sdk/dist/cjs/util');
+    const buyAmountWithSlippage = calculateWithSlippageBuy(devBuyLamports, 500n);
+    
+    // Use enhanced buy instruction with all required accounts
+    const buyTx = await buildBuyInstruction(
+      connection,
+      mainKeypair.publicKey,
+      mintKeypair.publicKey,
+      buyAmount,
+      buyAmountWithSlippage
+    );
+    
+    // Step 3: Build separate transactions for Jito bundle
+    const createTransaction = new Transaction();
+    createTransaction.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 600000 }));
+    createTransaction.add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 250000 }));
+    
+    if (Array.isArray(createTx)) {
+      createTx.forEach(ix => createTransaction.add(ix));
+    } else {
+      createTransaction.add(createTx);
+    }
+    
+    createTransaction.recentBlockhash = blockhash;
+    createTransaction.feePayer = mainKeypair.publicKey;
+    createTransaction.sign(mainKeypair, mintKeypair);
+    
+    const buyTransaction = new Transaction();
+    buyTransaction.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 600000 }));
+    buyTransaction.add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 250000 }));
+    
+    // Add all instructions from the buy transaction
+    if (Array.isArray(buyTx.instructions)) {
+      buyTx.instructions.forEach(ix => buyTransaction.add(ix));
+    } else {
+      // buyTx is already a Transaction, add its instructions
+      buyTx.instructions.forEach(ix => buyTransaction.add(ix));
+    }
+    
+    buyTransaction.recentBlockhash = blockhash;
+    buyTransaction.feePayer = mainKeypair.publicKey;
+    buyTransaction.sign(mainKeypair);
+    
+    // Step 4: Send as Jito bundle for atomic execution
+    console.log('🚀 Sending atomic create+buy as Jito bundle...');
+    const bundleResult = await sendJitoBundle([
+      createTransaction.serialize(),
+      buyTransaction.serialize()
+    ]);
+    
+    console.log('📦 Bundle sent:', bundleResult);
+    
+    // Return the first transaction signature as the deployment signature
+    return createTransaction.signature;
+    
+  } catch (err) {
+    console.error('Atomic create+buy error:', err);
+    throw new Error(handleTransactionError(err));
+  }
 }
 
 /**
@@ -240,76 +382,96 @@ async function handleDeployRequest(bot, connection, data, chatId, session, termM
 
     if (devBuyLamports > 0n) {
       // ─────────────────────────────────────────────────────────────────
-      // ATOMIC CREATE + DEV BUY
-      // Mirror the SDK's own createAndBuy sendTx flow exactly:
-      //   1. Build legacy Transaction with all instructions
-      //   2. Compile to VersionedTransaction (V0 message)
-      //   3. Sign + send — this matches how the pump.fun Anchor program
-      //      expects account metas to be compiled.
+      // ATOMIC CREATE + DEV BUY WITH JITO BUNDLE
+      // Uses Jito bundle for true atomic execution in same block
       // ─────────────────────────────────────────────────────────────────
-      console.log(`🚀 Atomic create+buy (${initialBuy} SOL) — dev is first buyer`);
+      console.log(`🚀 Atomic create+buy (${initialBuy} SOL) — using Jito bundle`);
 
       session.liveLogs.push({
         status: 'processing',
-        message: `🏗 Creating ${symbol} with atomic dev buy (${initialBuy} SOL ≈ ${estDevTokens} tokens)...`
+        message: `🏗 Creating ${symbol} with atomic dev buy (${initialBuy} SOL ≈ ${estDevTokens} tokens) via Jito bundle...`
       });
 
-      // Step 1 — create instruction (returns a Transaction per SDK source)
-      const createTx = await sdk.getCreateInstructions(
-        mainKeypair.publicKey,
-        tokenName,
-        symbol,
-        metadataUri,
-        mintKeypair
-      );
+      try {
+        deploymentSig = await executeAtomicCreateAndBuy(
+          connection,
+          sdk,
+          mainKeypair,
+          mintKeypair,
+          tokenName,
+          symbol,
+          metadataUri,
+          initialBuy
+        );
+        
+        console.log(`🔗 Atomic create+buy bundle sent: https://solscan.io/tx/${deploymentSig}`);
+        
+      } catch (bundleErr) {
+        console.error('Jito bundle failed, falling back to legacy method:', bundleErr.message);
+        
+        // Fallback to legacy method if Jito fails
+        session.liveLogs.push({
+          status: 'processing',
+          message: `⚠️ Jito bundle failed, trying legacy method...`
+        });
+        
+        // Legacy method (current implementation)
+        const createTx = await sdk.getCreateInstructions(
+          mainKeypair.publicKey,
+          tokenName,
+          symbol,
+          metadataUri,
+          mintKeypair
+        );
 
-      // Step 2 — buy instruction (returns a Transaction with optional ATA + buy)
-      const globalAccount = await sdk.getGlobalAccount('confirmed');
-      const buyAmount = globalAccount.getInitialBuyPrice(devBuyLamports);
-      const { calculateWithSlippageBuy } = require('pumpdotfun-sdk/dist/cjs/util');
-      const buyAmountWithSlippage = calculateWithSlippageBuy(devBuyLamports, 500n);
-      const buyTx = await sdk.getBuyInstructions(
-        mainKeypair.publicKey,
-        mintKeypair.publicKey,
-        globalAccount.feeRecipient,
-        buyAmount,
-        buyAmountWithSlippage
-      );
+        const globalAccount = await sdk.getGlobalAccount('confirmed');
+        const buyAmount = globalAccount.getInitialBuyPrice(devBuyLamports);
+        const { calculateWithSlippageBuy } = require('pumpdotfun-sdk/dist/cjs/util');
+        const buyAmountWithSlippage = calculateWithSlippageBuy(devBuyLamports, 500n);
+        
+        // Use enhanced buy instruction with all required accounts
+        const buyTx = await buildBuyInstruction(
+          connection,
+          mainKeypair.publicKey,
+          mintKeypair.publicKey,
+          buyAmount,
+          buyAmountWithSlippage
+        );
 
-      // Step 3 — combine into one legacy Transaction (same as SDK createAndBuy line 30-36)
-      const { Transaction: SolTx, ComputeBudgetProgram: CBP,
-              TransactionMessage, VersionedTransaction } = require('@solana/web3.js');
-      const combinedTx = new SolTx();
-      combinedTx.add(CBP.setComputeUnitLimit({ units: 600000 }));
-      combinedTx.add(CBP.setComputeUnitPrice({ microLamports: 250000 }));
-      combinedTx.add(createTx);  // Transaction → adds all its instructions
-      combinedTx.add(buyTx);     // Transaction → adds ATA + buy instructions
+        const combinedTx = new Transaction();
+        combinedTx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 600000 }));
+        combinedTx.add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 250000 }));
+        combinedTx.add(createTx);
+        
+        // Add all instructions from the buy transaction
+        if (Array.isArray(buyTx.instructions)) {
+          buyTx.instructions.forEach(ix => combinedTx.add(ix));
+        } else {
+          // buyTx is already a Transaction, add its instructions
+          buyTx.instructions.forEach(ix => combinedTx.add(ix));
+        }
 
-      // Step 4 — compile to V0 VersionedTransaction (SDK's buildVersionedTx)
-      const { blockhash } = await connection.getLatestBlockhash('confirmed');
-      const messageV0 = new TransactionMessage({
-        payerKey:        mainKeypair.publicKey,
-        recentBlockhash: blockhash,
-        instructions:    combinedTx.instructions,
-      }).compileToV0Message();
-      const versionedTx = new VersionedTransaction(messageV0);
+        const { blockhash } = await connection.getLatestBlockhash('confirmed');
+        const messageV0 = new TransactionMessage({
+          payerKey:        mainKeypair.publicKey,
+          recentBlockhash: blockhash,
+          instructions:    combinedTx.instructions,
+        }).compileToV0Message();
+        const versionedTx = new VersionedTransaction(messageV0);
+        versionedTx.sign([mainKeypair, mintKeypair]);
 
-      // Step 5 — sign with both required keypairs (creator + mint)
-      versionedTx.sign([mainKeypair, mintKeypair]);
+        const sig = await connection.sendTransaction(versionedTx, { skipPreflight: false });
+        console.log(`🔗 Legacy create+buy TX: https://solscan.io/tx/${sig}`);
 
-      // Step 6 — send (skipPreflight false, same as SDK)
-      const sig = await connection.sendTransaction(versionedTx, { skipPreflight: false });
-      console.log(`🔗 Create+buy TX: https://solscan.io/tx/${sig}`);
+        const latestBlockhash = await connection.getLatestBlockhash();
+        await connection.confirmTransaction({
+          blockhash:           latestBlockhash.blockhash,
+          lastValidBlockHeight: latestBlockhash.lastValidBlockHeight,
+          signature:           sig,
+        }, 'confirmed');
 
-      // Confirm
-      const latestBlockhash = await connection.getLatestBlockhash();
-      await connection.confirmTransaction({
-        blockhash:           latestBlockhash.blockhash,
-        lastValidBlockHeight: latestBlockhash.lastValidBlockHeight,
-        signature:           sig,
-      }, 'confirmed');
-
-      deploymentSig = sig;
+        deploymentSig = sig;
+      }
 
     } else {
       // ─────────────────────────────────────────
@@ -389,10 +551,13 @@ async function handleDeployRequest(bot, connection, data, chatId, session, termM
   } catch (err) {
     console.error('handleDeployRequest error:', err.message);
     
+    // Enhanced error handling with transaction logs
+    const errorMessage = handleTransactionError(err);
+    
     // Add error log for webapp
     if (session) {
       session.liveLogs = session.liveLogs || [];
-      session.liveLogs.push({ status: 'error', message: `❌ Deployment failed: ${err.message}` });
+      session.liveLogs.push({ status: 'error', message: `❌ Deployment failed: ${errorMessage}` });
       session.liveLogs.push({ status: 'completed', message: `❌ Deployment failed!` });
     }
     
@@ -402,7 +567,7 @@ async function handleDeployRequest(bot, connection, data, chatId, session, termM
     const tradePanel = actionMenu(session, mainBalance.toFixed(4));
     
     await bot.sendMessage(chatId, 
-      `❌ *Deployment Failed:*\n\`${err.message}\``, 
+      `❌ *Deployment Failed:*\n\n\`${errorMessage}\``, 
       { parse_mode: 'Markdown' }
     ).then(() => {
       // Show trade panel after error message
@@ -513,12 +678,13 @@ async function sellTokenAmount(bot, connection, buyer, sellAmount, contractAddre
 
 /**
  * ===============================
- * 🛒 BUY INSTRUCTION BUILDER
+ * 🛒 ENHANCED BUY INSTRUCTION BUILDER
  * ===============================
  */
 async function buildBuyInstruction(connection, userPublicKey, mint, tokenAmount, maxSolCost) {
   const { PumpFunSDK } = require('pumpdotfun-sdk');
   const { AnchorProvider } = require('@coral-xyz/anchor');
+  const { getAssociatedTokenAddress, createAssociatedTokenAccountInstruction } = require('@solana/spl-token');
   
   // Create a dummy provider for SDK usage
   const dummyWallet = {
@@ -531,17 +697,53 @@ async function buildBuyInstruction(connection, userPublicKey, mint, tokenAmount,
   const sdk = new PumpFunSDK(provider);
   
   try {
-    // Get the global account for fee recipient
+    // Get required accounts
     const globalAccount = await sdk.getGlobalAccount('confirmed');
+    const bondingCurvePDA = sdk.getBondingCurvePDA(mint);
+    const associatedBondingCurve = await getAssociatedTokenAddress(mint, bondingCurvePDA, true);
+    const associatedUser = await getAssociatedTokenAddress(mint, userPublicKey, false);
     
-    // Use the SDK's getBuyInstructions with proper parameters
-    return await sdk.getBuyInstructions(
-      userPublicKey,
-      mint,
-      globalAccount.feeRecipient,
-      tokenAmount,
-      maxSolCost
+    // Get the global PDA
+    const [globalPDA] = PublicKey.findProgramAddressSync(
+      [Buffer.from('global')], 
+      new PublicKey('6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P')
     );
+    
+    // Build transaction with all required accounts
+    const transaction = new Transaction();
+    
+    // Add ATA creation if needed
+    try {
+      await connection.getAccountInfo(associatedUser);
+    } catch (e) {
+      transaction.add(createAssociatedTokenAccountInstruction(
+        userPublicKey,
+        associatedUser,
+        userPublicKey,
+        mint
+      ));
+    }
+    
+    // Add the buy instruction with all required accounts from IDL
+    transaction.add(await sdk.program.methods
+      .buy(new (require('bn.js').BN)(tokenAmount.toString()), new (require('bn.js').BN)(maxSolCost.toString()))
+      .accounts({
+        global: globalPDA,                           // ✅ Required global account
+        feeRecipient: globalAccount.feeRecipient,
+        mint: mint,
+        bondingCurve: bondingCurvePDA,
+        associatedBondingCurve: associatedBondingCurve,
+        associatedUser: associatedUser,
+        user: userPublicKey,
+        systemProgram: new PublicKey('11111111111111111111111111111111'),
+        tokenProgram: new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'),
+        rent: new PublicKey('SysvarRent111111111111111111111111111111111'),
+        eventAuthority: new PublicKey('Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasjjnr7XxXp9F1'),
+        program: new PublicKey('6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P')
+      })
+      .transaction());
+    
+    return transaction;
   } catch (err) {
     console.error('buildBuyInstruction error:', err.message);
     throw err;
@@ -623,5 +825,8 @@ module.exports = {
   buildBuyInstruction,
   getBondingCurveData,
   calcBuyTokens,
-  sendTx
+  sendTx,
+  sendJitoBundle,
+  executeAtomicCreateAndBuy,
+  handleTransactionError
 };
