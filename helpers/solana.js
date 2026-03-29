@@ -330,12 +330,58 @@ async function executeAtomicCreateAndBuy(connection, sdk, mainKeypair, mintKeypa
       buyAmountWithSlippage
     );
     
-    // Extract instructions from transactions
+    // Extract and validate instructions before sending to Jito
     const createInstructions = Array.isArray(createTx) ? createTx : [createTx];
     const buyInstructions = Array.isArray(buyTx.instructions) ? buyTx.instructions : buyTx.instructions;
     
+    console.log('🔍 Debug - Validating instructions before Jito bundle:');
+    
+    // Validate all instruction keys
+    const allInstructions = [...createInstructions, ...buyInstructions];
+    for (let i = 0; i < allInstructions.length; i++) {
+      const ix = allInstructions[i];
+      console.log(`Instruction ${i}: ${ix?.programId?.toString() || 'undefined'}`);
+      
+      if (!ix || !ix.keys) {
+        throw new Error(`Instruction ${i} is invalid or missing keys`);
+      }
+      
+      for (let j = 0; j < ix.keys.length; j++) {
+        const key = ix.keys[j];
+        if (!key || !key.pubkey) {
+          throw new Error(`Instruction ${i}, Key ${j} has undefined pubkey`);
+        }
+        try {
+          key.pubkey.toString();
+        } catch (e) {
+          throw new Error(`Instruction ${i}, Key ${j} has invalid pubkey: ${e.message}`);
+        }
+      }
+    }
+    
+    // Check if buy instruction has global_volume_accumulator
+    const buyInstruction = buyInstructions.find(ix => ix.programId.toString() === '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P');
+    if (buyInstruction && buyInstruction.keys.length === 12) {
+      console.log('⚠️ Buy instruction missing global_volume_accumulator - adding it');
+      
+      // Add the missing global_volume_accumulator account
+      const [globalVolumeAccumulator] = PublicKey.findProgramAddressSync(
+        [Buffer.from('global_volume_accumulator')], 
+        new PublicKey('6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P')
+      );
+      
+      buyInstruction.keys.push({
+        pubkey: globalVolumeAccumulator,
+        isSigner: false,
+        isWritable: true
+      });
+      
+      console.log(`✅ Added global_volume_accumulator: ${globalVolumeAccumulator.toString()}`);
+      console.log(`🔍 Buy instruction now has ${buyInstruction.keys.length} keys`);
+    }
+    
     // Step 3: Send as improved Jito bundle
-    console.log(' Sending atomic create+buy as improved Jito bundle...');
+    console.log('🚀 Sending atomic create+buy as improved Jito bundle...');
     const bundleResult = await sendJitoBundle({
       payer: mainKeypair, // Pass the keypair directly, not publicKey
       instructionsTx1: createInstructions,
