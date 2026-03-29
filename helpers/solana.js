@@ -12,7 +12,8 @@ const {
   SendTransactionError,
   ComputeBudgetProgram,
   TransactionMessage,
-  VersionedTransaction
+  VersionedTransaction,
+  SystemProgram
 } = require('@solana/web3.js');
 
 const { base58Decode, base58Encode } = require('../utils/base58');
