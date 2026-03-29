@@ -237,10 +237,12 @@ async function executeAtomicCreateAndBuy(connection, sdk, mainKeypair, mintKeypa
     }
     
     // Create metadata account instruction
+    const MPL_TOKEN_METADATA_PROGRAM_ID = new PublicKey("metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s");
     const [metadataAccount] = PublicKey.findProgramAddressSync([
       Buffer.from("metadata"),
+      MPL_TOKEN_METADATA_PROGRAM_ID.toBuffer(),
       mintKeypair.publicKey.toBuffer()
-    ], new PublicKey("metaqbxxUerdq28cj1RbAWkYQm3x6dC"));
+    ], MPL_TOKEN_METADATA_PROGRAM_ID);
     
     const createMetadataAccountIx = new TransactionInstruction({
       keys: [
@@ -976,6 +978,23 @@ async function sellTokenAmount(bot, connection, buyer, sellAmount, contractAddre
       500n // 5% slippage
     );
 
+    const PUMP_PROGRAM = new PublicKey("6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P");
+    if (sellTx && sellTx.instructions) {
+      sellTx.instructions.forEach(ix => {
+        if (ix.programId.equals(PUMP_PROGRAM)) {
+          const [globalVolumeAccumulator] = PublicKey.findProgramAddressSync(
+            [Buffer.from('global_volume_accumulator')], 
+            PUMP_PROGRAM
+          );
+          ix.keys.push({
+            pubkey: globalVolumeAccumulator,
+            isSigner: false,
+            isWritable: true
+          });
+        }
+      });
+    }
+
     const sig = await buildAndSendTx(
       connection,
       sellTx.instructions,
@@ -1031,6 +1050,24 @@ async function buildBuyInstruction(connection, userPublicKey, mint, tokenAmount,
       maxSolCost
     );
     
+    // THE FIX: Add global_volume_accumulator manually because legacy sdk doesn't
+    const PUMP_PROGRAM = new PublicKey("6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P");
+    if (buyTx && buyTx.instructions) {
+      buyTx.instructions.forEach(ix => {
+        if (ix.programId.equals(PUMP_PROGRAM)) {
+          const [globalVolumeAccumulator] = PublicKey.findProgramAddressSync(
+            [Buffer.from('global_volume_accumulator')], 
+            PUMP_PROGRAM
+          );
+          ix.keys.push({
+            pubkey: globalVolumeAccumulator,
+            isSigner: false,
+            isWritable: true
+          });
+        }
+      });
+    }
+
     console.log('✅ SDK buy instruction created successfully');
     console.log('🔍 Debug - buyTx structure:');
     console.log('buyTx type:', typeof buyTx);
