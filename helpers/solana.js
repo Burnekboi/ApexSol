@@ -215,20 +215,30 @@ async function sendJitoBundle({ payer, instructions, connection, additionalSigne
       const buyInstructions = [];
       const tipInstructions = [];
       
-      instructions.forEach(ix => {
-        if (ix.programId?.toString() === '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P') {
+      console.log('🔍 Debugging instruction grouping:');
+      instructions.forEach((ix, index) => {
+        const programId = ix.programId?.toString() || 'unknown';
+        const isPumpFun = programId === '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P';
+        const isTip = ix.keys?.some(k => k.pubkey?.toString()?.includes('Cw8CFyMv'));
+        
+        console.log(`Instruction ${index}: ${programId} (pump.fun: ${isPumpFun}, tip: ${isTip})`);
+        
+        if (isPumpFun) {
           buyInstructions.push(ix);
-        } else if (ix.keys?.some(k => k.pubkey?.toString()?.includes('Cw8CFyMv'))) {
+        } else if (isTip) {
           tipInstructions.push(ix);
         } else {
           createInstructions.push(ix);
         }
       });
+      
+      console.log(`📊 Grouped: ${createInstructions.length} create, ${buyInstructions.length} buy, ${tipInstructions.length} tip`);
 
       const transactions = [];
 
       // ⚡ TX1: CREATE TOKEN (with compute budget + create instructions)
       if (createInstructions.length > 0) {
+        console.log('🔧 Building CREATE transaction...');
         const msg1 = new TransactionMessage({
           payerKey: payer.publicKey,
           recentBlockhash: blockhash,
@@ -236,13 +246,19 @@ async function sendJitoBundle({ payer, instructions, connection, additionalSigne
         }).compileToV0Message();
 
         const tx1 = new VersionedTransaction(msg1);
+        console.log('📝 Signing CREATE transaction with:', {
+          payer: payer.publicKey.toString(),
+          additionalSigners: additionalSigners.map(s => s.publicKey.toString())
+        });
         // Sign with payer AND mintKeypair for token creation
         tx1.sign([payer, ...additionalSigners]);
+        console.log('✅ CREATE transaction signed successfully');
         transactions.push(tx1);
       }
 
       // ⚡ TX2: BUY TOKEN (with compute budget + buy instructions)
       if (buyInstructions.length > 0) {
+        console.log('🔧 Building BUY transaction...');
         const msg2 = new TransactionMessage({
           payerKey: payer.publicKey,
           recentBlockhash: blockhash, // SAME BLOCKHASH
@@ -250,13 +266,18 @@ async function sendJitoBundle({ payer, instructions, connection, additionalSigne
         }).compileToV0Message();
 
         const tx2 = new VersionedTransaction(msg2);
+        console.log('📝 Signing BUY transaction with:', {
+          payer: payer.publicKey.toString()
+        });
         // ONLY payer signs buy transaction
         tx2.sign([payer]);
+        console.log('✅ BUY transaction signed successfully');
         transactions.push(tx2);
       }
 
       // ⚡ TX3: JITO TIP
       if (tipInstructions.length > 0) {
+        console.log('🔧 Building TIP transaction...');
         const msgTip = new TransactionMessage({
           payerKey: payer.publicKey,
           recentBlockhash: blockhash, // SAME BLOCKHASH
@@ -264,8 +285,12 @@ async function sendJitoBundle({ payer, instructions, connection, additionalSigne
         }).compileToV0Message();
 
         const txTip = new VersionedTransaction(msgTip);
+        console.log('📝 Signing TIP transaction with:', {
+          payer: payer.publicKey.toString()
+        });
         // ONLY payer signs tip transaction
         txTip.sign([payer]);
+        console.log('✅ TIP transaction signed successfully');
         transactions.push(txTip);
       }
 
