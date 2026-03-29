@@ -218,13 +218,28 @@ async function sendJitoBundle({ payer, instructionsTx1, instructionsTx2, connect
  */
 function handleTransactionError(err) {
   if (err instanceof SendTransactionError) {
-    const logs = err.getLogs ? err.getLogs() : [];
+    // Handle both sync and async getLogs
+    let logs = [];
+    try {
+      if (err.getLogs) {
+        const logsResult = err.getLogs();
+        logs = Array.isArray(logsResult) ? logsResult : [];
+      }
+    } catch (logErr) {
+      console.error('Error getting logs:', logErr.message);
+      logs = [];
+    }
+    
     console.error('Transaction logs:', logs);
     
     // Look for specific error patterns
     const logString = logs.join(' ');
     if (logString.includes('AccountNotEnoughKeys') || logString.includes('global_volume_accumulator')) {
       return 'Transaction failed: Missing required accounts (global_volume_accumulator). This usually means the SDK version is incompatible or the buy instruction needs additional accounts.';
+    }
+    
+    if (logString.includes('AccountNotInitialized') || logString.includes('associated_user')) {
+      return 'Transaction failed: Associated token account not initialized. This usually happens when the ATA creation instruction is missing.';
     }
     
     return `Transaction failed: ${err.message}\nLogs: ${logs.join('\n')}`;
@@ -296,7 +311,7 @@ async function executeAtomicCreateAndBuy(connection, sdk, mainKeypair, mintKeypa
     // Step 3: Send as improved Jito bundle
     console.log(' Sending atomic create+buy as improved Jito bundle...');
     const bundleResult = await sendJitoBundle({
-      payer: mainKeypair,
+      payer: mainKeypair, // Pass the keypair directly, not publicKey
       instructionsTx1: createInstructions,
       instructionsTx2: buyInstructions,
       connection: connection
@@ -790,7 +805,7 @@ async function sellTokenAmount(bot, connection, buyer, sellAmount, contractAddre
 async function buildBuyInstruction(connection, userPublicKey, mint, tokenAmount, maxSolCost) {
   const { PumpFunSDK } = require('pumpdotfun-sdk');
   const { AnchorProvider } = require('@coral-xyz/anchor');
-  const { getAssociatedTokenAddress, createAssociatedTokenAccountInstruction } = require('@solana/spl-token');
+  const { getAssociatedTokenAddress, createAssociatedTokenAccountInstruction, getAccount } = require('@solana/spl-token');
   
   // Create a dummy provider for SDK usage
   const dummyWallet = {
@@ -818,10 +833,12 @@ async function buildBuyInstruction(connection, userPublicKey, mint, tokenAmount,
     // Build transaction with all required accounts
     const transaction = new Transaction();
     
-    // Add ATA creation if needed
+    // Add ATA creation if needed - use proper getAccount check
     try {
-      await connection.getAccountInfo(associatedUser);
+      await getAccount(connection, associatedUser, 'confirmed');
+      console.log('ATA already exists for user');
     } catch (e) {
+      console.log('Creating ATA for user');
       transaction.add(createAssociatedTokenAccountInstruction(
         userPublicKey,
         associatedUser,
@@ -843,7 +860,7 @@ async function buildBuyInstruction(connection, userPublicKey, mint, tokenAmount,
         user: userPublicKey,
         systemProgram: new PublicKey('11111111111111111111111111111111'),
         tokenProgram: new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'),
-        rent: new PublicKey('SysvarRent111111111111111111111111111111111'),
+        rent: new PublicKey('SysvarRent111111111111111111111111111111'),
         eventAuthority: new PublicKey('Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasjjnr7XxXp9F1'),
         program: new PublicKey('6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P')
       })
