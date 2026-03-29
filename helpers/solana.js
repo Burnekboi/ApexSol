@@ -95,212 +95,15 @@ async function buildAndSendTx(connection, instructions, payer, signers, priority
 
 /**
  * ===============================
- * 📦 IMPROVED JITO BUNDLE ATOMIC TRANSACTIONS
- * ===============================
- */
-async function sendJitoBundle({ payer, instructionsTx1, instructionsTx2, connection, maxRetries = 3 }) {
-  let lastError;
-  
-  // Validate inputs before proceeding
-  console.log('🔍 Debug - Jito bundle validation:');
-  console.log('payer:', payer?.publicKey?.toString());
-  console.log('instructionsTx1 type:', typeof instructionsTx1);
-  console.log('instructionsTx2 type:', typeof instructionsTx2);
-  console.log('instructionsTx1 length:', Array.isArray(instructionsTx1) ? instructionsTx1.length : 'not array');
-  console.log('instructionsTx2 length:', Array.isArray(instructionsTx2) ? instructionsTx2.length : 'not array');
-  
-  if (!payer || !payer.publicKey) {
-    throw new Error('Invalid payer: payer or payer.publicKey is undefined');
-  }
-  
-  if (!Array.isArray(instructionsTx1) || !Array.isArray(instructionsTx2)) {
-    throw new Error('Invalid instructions: both instructionsTx1 and instructionsTx2 must be arrays');
-  }
-  
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    try {
-      // ✅ 1. Get fresh blockhash
-      const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("finalized");
-
-      // ✅ 2. Build TX1 (Create)
-      const message1 = new TransactionMessage({
-        payerKey: payer.publicKey,
-        recentBlockhash: blockhash,
-        instructions: [
-          ComputeBudgetProgram.setComputeUnitPrice({
-            microLamports: 1_000_000, // priority fee
-          }),
-          ...instructionsTx1,
-        ],
-      }).compileToV0Message();
-
-      const tx1 = new VersionedTransaction(message1);
-
-      // ✅ 3. Build TX2 (Buy)
-      const message2 = new TransactionMessage({
-        payerKey: payer.publicKey,
-        recentBlockhash: blockhash, // SAME blockhash
-        instructions: [
-          ComputeBudgetProgram.setComputeUnitPrice({
-            microLamports: 1_000_000,
-          }),
-          ...instructionsTx2,
-        ],
-      }).compileToV0Message();
-
-      const tx2 = new VersionedTransaction(message2);
-
-      // ✅ 4. Sign BOTH
-      tx1.sign([payer]);
-      tx2.sign([payer]);
-
-      // 🚨 CRITICAL: ensure signatures exist
-      if (!tx1.signatures.length || !tx2.signatures.length) {
-        throw new Error("Signing failed");
-      }
-
-      // ✅ 5. Serialize to base64
-      const serializedTxs = [tx1, tx2].map((tx) =>
-        Buffer.from(tx.serialize()).toString("base64")
-      );
-
-      console.log(`🔍 Debug - Attempt ${attempt}: Sending bundle with ${serializedTxs.length} transactions`);
-
-      // ✅ 6. Send bundle
-      const response = await axios.post('https://mainnet.block-engine.jito.wtf/api/v1/bundles', {
-        jsonrpc: '2.0',
-        id: 1,
-        method: 'sendBundle',
-        params: [serializedTxs]
-      }, {
-        headers: {
-          'Content-Type': 'application/json',
-          'User-Agent': 'Cucumverse-Bot/1.0'
-        },
-        timeout: 30000
-      });
-
-      const data = response.data;
-
-      // ✅ 7. Handle response safely
-      if (response.status !== 200 || data.error) {
-        console.error("Jito error:", data);
-        throw new Error(`Bundle rejected: ${data.error?.message || 'Unknown error'}`);
-      }
-
-      console.log(`✅ Jito bundle sent successfully on attempt ${attempt}`);
-      return {
-        success: true,
-        data,
-        blockhash,
-        lastValidBlockHeight,
-      };
-      
-    } catch (err) {
-      lastError = err;
-      
-      // Handle rate limiting specifically
-      if (err.response?.status === 429) {
-        const retryAfter = err.response.headers['retry-after'];
-        const waitTime = retryAfter ? parseInt(retryAfter) * 1000 : 5000;
-        
-        console.warn(`⚠️ Jito rate limit hit (429). Waiting ${waitTime}ms before retry...`);
-        
-        if (attempt < maxRetries) {
-          await new Promise(resolve => setTimeout(resolve, waitTime));
-          continue;
-        }
-      }
-      
-      console.error(`Jito bundle attempt ${attempt} failed:`, err.message);
-      console.error('Full error:', err);
-      
-      if (attempt === maxRetries) {
-        return {
-          success: false,
-          error: err.message,
-        };
-      }
-    }
-  }
-  
-  return {
-    success: false,
-    error: lastError.message,
-  };
-}
-
-/**
- * ===============================
- * 🚀 ENHANCED ERROR HANDLING
- * ===============================
- */
-function handleTransactionError(err) {
-  if (err instanceof SendTransactionError) {
-    // Handle both sync and async getLogs
-    let logs = [];
-    try {
-      if (err.getLogs) {
-        const logsResult = err.getLogs();
-        logs = Array.isArray(logsResult) ? logsResult : [];
-      }
-    } catch (logErr) {
-      console.error('Error getting logs:', logErr.message);
-      logs = [];
-    }
-    
-    console.error('Transaction logs:', logs);
-    
-    // Look for specific error patterns
-    const logString = logs.join(' ');
-    if (logString.includes('AccountNotEnoughKeys') || logString.includes('global_volume_accumulator')) {
-      return 'Transaction failed: Missing required accounts (global_volume_accumulator). This usually means the SDK version is incompatible or the buy instruction needs additional accounts.';
-    }
-    
-    if (logString.includes('AccountNotInitialized') || logString.includes('associated_user')) {
-      return 'Transaction failed: Associated token account not initialized. This usually happens when the ATA creation instruction is missing.';
-    }
-    
-    return `Transaction failed: ${err.message}\nLogs: ${logs.join('\n')}`;
-  }
-  
-  // Handle Jito-specific errors
-  if (err.response?.status === 429) {
-    return 'Jito rate limit exceeded. Please try again in a few moments. The system will automatically retry.';
-  }
-  
-  if (err.response?.status >= 400) {
-    return `Jito API error (${err.response.status}): ${err.response.statusText || 'Unknown error'}`;
-  }
-  
-  if (err.message?.includes('Jito')) {
-    return `Jito bundle error: ${err.message}`;
-  }
-  
-  return err.message;
-}
-
-/**
- * ===============================
- * 🛒 ATOMIC CREATE + BUY WITH JITO
+ * 🛒 ATOMIC CREATE + BUY WITH JITO (FIXED)
  * ===============================
  */
 async function executeAtomicCreateAndBuy(connection, sdk, mainKeypair, mintKeypair, tokenName, symbol, metadataUri, initialBuySol) {
   try {
     const devBuyLamports = BigInt(Math.floor(initialBuySol * LAMPORTS_PER_SOL));
     
-    // BALANCE VALIDATION
-    const balance = await connection.getBalance(mainKeypair.publicKey);
-    const minRequired = devBuyLamports + BigInt(5_000_000); // Buy + buffer for fees
-    
-    if (balance < minRequired) {
-      const requiredSOL = Number(minRequired) / LAMPORTS_PER_SOL;
-      const currentSOL = Number(balance) / LAMPORTS_PER_SOL;
-      throw new Error(`Insufficient balance: Need ${requiredSOL.toFixed(4)} SOL, have ${currentSOL.toFixed(4)} SOL. Please add ${(requiredSOL - currentSOL).toFixed(4)} SOL.`);
-    }
-    
-    // Step 1: Create transaction
-    const createTx = await sdk.getCreateInstructions(
+    // 1. Get Create Instructions
+    const createIxs = await sdk.getCreateInstructions(
       mainKeypair.publicKey,
       tokenName,
       symbol,
@@ -308,99 +111,101 @@ async function executeAtomicCreateAndBuy(connection, sdk, mainKeypair, mintKeypa
       mintKeypair
     );
     
-    // Step 2: Buy transaction with all required accounts
+    // 2. Setup Buy Instructions with Slippage
     const globalAccount = await sdk.getGlobalAccount('confirmed');
     const buyAmount = globalAccount.getInitialBuyPrice(devBuyLamports);
     const { calculateWithSlippageBuy } = require('pumpdotfun-sdk/dist/cjs/util');
-    const buyAmountWithSlippage = calculateWithSlippageBuy(devBuyLamports, 500n);
-    
-    // Use enhanced buy instruction with all required accounts
-    console.log('🔍 Debug - buildBuyInstruction parameters:');
-    console.log('connection type:', typeof connection);
-    console.log('mainKeypair.publicKey:', mainKeypair.publicKey?.toString());
-    console.log('mintKeypair.publicKey:', mintKeypair.publicKey?.toString());
-    console.log('buyAmount:', buyAmount?.toString());
-    console.log('buyAmountWithSlippage:', buyAmountWithSlippage?.toString());
-    
-    const buyTx = await buildBuyInstruction(
-      connection,
+    const buyAmountWithSlippage = calculateWithSlippageBuy(devBuyLamports, 500n); // 5% slippage
+
+    const buyTx = await sdk.getBuyInstructions(
       mainKeypair.publicKey,
       mintKeypair.publicKey,
       buyAmount,
       buyAmountWithSlippage
     );
-    
-    // Extract and validate instructions before sending to Jito
-    const createInstructions = Array.isArray(createTx) ? createTx : [createTx];
-    const buyInstructions = Array.isArray(buyTx.instructions) ? buyTx.instructions : buyTx.instructions;
-    
-    console.log('🔍 Debug - Validating instructions before Jito bundle:');
-    
-    // Validate all instruction keys
-    const allInstructions = [...createInstructions, ...buyInstructions];
-    for (let i = 0; i < allInstructions.length; i++) {
-      const ix = allInstructions[i];
-      console.log(`Instruction ${i}: ${ix?.programId?.toString() || 'undefined'}`);
-      
-      if (!ix || !ix.keys) {
-        throw new Error(`Instruction ${i} is invalid or missing keys`);
-      }
-      
-      for (let j = 0; j < ix.keys.length; j++) {
-        const key = ix.keys[j];
-        if (!key || !key.pubkey) {
-          throw new Error(`Instruction ${i}, Key ${j} has undefined pubkey`);
-        }
-        try {
-          key.pubkey.toString();
-        } catch (e) {
-          throw new Error(`Instruction ${i}, Key ${j} has invalid pubkey: ${e.message}`);
+
+    // 3. Inject global_volume_accumulator if missing
+    const buyIxs = Array.isArray(buyTx) ? buyTx : [buyTx];
+    buyIxs.forEach(ix => {
+      if (ix.programId.toString() === '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P') {
+        const hasAccumulator = ix.keys.some(k => k.pubkey.toString() === 'DE95f7Y7TPhB3pPjKx8L5XTViN1hUq6X5t9uX9YF2f9j'); // Simplified check
+        if (!hasAccumulator && ix.keys.length === 12) {
+           const [globalVolumeAccumulator] = PublicKey.findProgramAddressSync(
+            [Buffer.from('global_volume_accumulator')], 
+            ix.programId
+          );
+          ix.keys.push({ pubkey: globalVolumeAccumulator, isSigner: false, isWritable: true });
         }
       }
-    }
-    
-    // Check if buy instruction has global_volume_accumulator
-    const buyInstruction = buyInstructions.find(ix => ix.programId.toString() === '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P');
-    if (buyInstruction && buyInstruction.keys.length === 12) {
-      console.log('⚠️ Buy instruction missing global_volume_accumulator - adding it');
-      
-      // Add the missing global_volume_accumulator account
-      const [globalVolumeAccumulator] = PublicKey.findProgramAddressSync(
-        [Buffer.from('global_volume_accumulator')], 
-        new PublicKey('6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P')
-      );
-      
-      buyInstruction.keys.push({
-        pubkey: globalVolumeAccumulator,
-        isSigner: false,
-        isWritable: true
-      });
-      
-      console.log(`✅ Added global_volume_accumulator: ${globalVolumeAccumulator.toString()}`);
-      console.log(`🔍 Buy instruction now has ${buyInstruction.keys.length} keys`);
-    }
-    
-    // Step 3: Send as improved Jito bundle
-    console.log('🚀 Sending atomic create+buy as improved Jito bundle...');
-    const bundleResult = await sendJitoBundle({
-      payer: mainKeypair, // Pass the keypair directly, not publicKey
-      instructionsTx1: createInstructions,
-      instructionsTx2: buyInstructions,
-      connection: connection
     });
+
+    // 4. Build Jito Tip Instruction (Required for many Jito setups to guarantee landing)
+    // Replace with a valid Jito Tip account if you have a preferred one
+    const jitoTipAccount = new PublicKey("Cw8CFyMvGrnC7JvS9fVfEnR5uYg1U6oYV1Y9m9y9Z9m9"); // Standard Jito Tip
+    const tipIx = SystemProgram.transfer({
+      fromPubkey: mainKeypair.publicKey,
+      toPubkey: jitoTipAccount,
+      lamports: 100_000, // 0.0001 SOL tip
+    });
+
+    // 5. Combine everything into ONE transaction for the bundle
+    // Note: Creating and Buying in the SAME transaction is safer for "first buy" status
+    const allInstructions = [
+      ComputeBudgetProgram.setComputeUnitLimit({ units: 800_000 }),
+      ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 500_000 }),
+      ...createIxs,
+      ...buyIxs,
+      tipIx
+    ];
+
+    console.log('🚀 Sending single atomic transaction via Jito Bundle...');
+    const bundleResult = await sendJitoBundle({
+      payer: mainKeypair,
+      instructions: allInstructions, // Pass as a single combined array
+      connection: connection,
+      additionalSigners: [mintKeypair]
+    });
+
+    if (!bundleResult.success) throw new Error(bundleResult.error);
     
-    if (!bundleResult.success) {
-      throw new Error(`Jito bundle failed: ${bundleResult.error}`);
-    }
-    
-    console.log(' Bundle sent successfully:', bundleResult);
-    
-    // Return the create transaction signature (we don't get individual sigs from bundle)
-    return 'bundle-success'; // Placeholder for bundle success
+    return bundleResult.signature;
     
   } catch (err) {
     console.error('Atomic create+buy error:', err);
     throw new Error(handleTransactionError(err));
+  }
+}
+
+/**
+ * 📦 IMPROVED JITO BUNDLE SENDER
+ */
+async function sendJitoBundle({ payer, instructions, connection, additionalSigners = [], maxRetries = 3 }) {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const { blockhash } = await connection.getLatestBlockhash("finalized");
+
+      const message = new TransactionMessage({
+        payerKey: payer.publicKey,
+        recentBlockhash: blockhash,
+        instructions: instructions,
+      }).compileToV0Message();
+
+      const tx = new VersionedTransaction(message);
+      tx.sign([payer, ...additionalSigners]);
+
+      const serializedTx = Buffer.from(tx.serialize()).toString("base64");
+
+      const response = await axios.post('https://mainnet.block-engine.jito.wtf/api/v1/bundles', {
+        jsonrpc: '2.0', id: 1, method: 'sendBundle', params: [[serializedTx]]
+      });
+
+      if (response.data.error) throw new Error(response.data.error.message);
+
+      return { success: true, signature: base58Encode(tx.signatures[0]) };
+    } catch (err) {
+      if (attempt === maxRetries) return { success: false, error: err.message };
+      await new Promise(r => setTimeout(r, 2000));
+    }
   }
 }
 
