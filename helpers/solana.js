@@ -117,6 +117,7 @@ async function executeAtomicCreateAndBuy(connection, sdk, mainKeypair, mintKeypa
     console.log(`✅ SOL balance check passed: ${(balance / LAMPORTS_PER_SOL).toFixed(4)} SOL available`);
 
     // 1. Get standard Create instructions
+    console.log('🔍 Debug - Getting create instructions...');
     const createIxs = await sdk.getCreateInstructions(
       mainKeypair.publicKey,
       tokenName,
@@ -124,6 +125,23 @@ async function executeAtomicCreateAndBuy(connection, sdk, mainKeypair, mintKeypa
       metadataUri,
       mintKeypair
     );
+    
+    console.log('🔍 Debug - Raw createIxs result:');
+    console.log('createIxs:', createIxs);
+    console.log('createIxs type:', typeof createIxs);
+    console.log('createIxs isArray:', Array.isArray(createIxs));
+    if (Array.isArray(createIxs)) {
+      console.log('createIxs length:', createIxs.length);
+      createIxs.forEach((ix, index) => {
+        console.log(`Create instruction ${index}:`, {
+          programId: ix.programId?.toString() || 'undefined',
+          keys: ix.keys?.length || 0,
+          data: ix.data?.length || 0,
+          hasProgramId: !!ix.programId,
+          hasKeys: !!ix.keys
+        });
+      });
+    }
 
     // 2. Prepare Buy Instruction (Manual Construction)
     const globalAccount = await sdk.getGlobalAccount('confirmed');
@@ -327,9 +345,20 @@ async function sendJitoBundle({ payer, instructions, connection, additionalSigne
       }
 
       // 📦 BUNDLE ORDER: CREATE → BUY → TIP
-      const bundle = transactions.map((tx) =>
-        Buffer.from(tx.serialize()).toString("base64")
-      );
+      console.log('🔍 Debug - Building bundle...');
+      console.log('Transactions count:', transactions.length);
+      
+      const bundle = transactions.map((tx, index) => {
+        console.log(`Serializing transaction ${index}...`);
+        try {
+          const serialized = Buffer.from(tx.serialize()).toString("base64");
+          console.log(`Transaction ${index} serialized successfully`);
+          return serialized;
+        } catch (err) {
+          console.error(`Error serializing transaction ${index}:`, err);
+          throw new Error(`Failed to serialize transaction ${index}: ${err.message}`);
+        }
+      });
 
       // 🚀 SEND TO JITO
       const response = await fetch('https://mainnet.block-engine.jito.wtf/api/v1/bundles', {
