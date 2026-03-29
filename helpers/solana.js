@@ -6,6 +6,7 @@ const {
   TransactionMessage, 
   VersionedTransaction, 
   Transaction,
+  TransactionInstruction,
   SystemProgram, 
   LAMPORTS_PER_SOL, 
   ComputeBudgetProgram 
