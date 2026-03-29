@@ -887,23 +887,46 @@ async function buildBuyInstruction(connection, userPublicKey, mint, tokenAmount,
     }
     
     // Add the buy instruction with all required accounts from IDL
-    transaction.add(await sdk.program.methods
-      .buy(new (require('bn.js').BN)(tokenAmount.toString()), new (require('bn.js').BN)(maxSolCost.toString()))
-      .accounts({
-        global: globalPDA,                           // ✅ Required global account
-        feeRecipient: globalAccount.feeRecipient,
-        mint: mint,
-        bondingCurve: bondingCurvePDA,
-        associatedBondingCurve: associatedBondingCurve,
-        associatedUser: associatedUser,
-        user: userPublicKey,
-        systemProgram: new PublicKey('11111111111111111111111111111111'),
-        tokenProgram: new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'),
-        rent: new PublicKey('SysvarRent111111111111111111111111111111'),
-        eventAuthority: new PublicKey('Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasjjnr7XxXp9F1'),
-        program: new PublicKey('6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P')
-      })
-      .transaction());
+    console.log('🔍 Debug - Creating PublicKey objects:');
+    
+    try {
+      const systemProgram = new PublicKey('11111111111111111111111111111111');
+      console.log('✅ systemProgram created');
+      
+      const tokenProgram = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
+      console.log('✅ tokenProgram created');
+      
+      const rent = new PublicKey('SysvarRent111111111111111111111111111111');
+      console.log('✅ rent created');
+      
+      const eventAuthority = new PublicKey('Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasjjnr7XxXp9F1');
+      console.log('✅ eventAuthority created');
+      
+      const program = new PublicKey('6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P');
+      console.log('✅ program created');
+      
+      transaction.add(await sdk.program.methods
+        .buy(new (require('bn.js').BN)(tokenAmount.toString()), new (require('bn.js').BN)(maxSolCost.toString()))
+        .accounts({
+          global: globalPDA,                           // ✅ Required global account
+          feeRecipient: globalAccount.feeRecipient,
+          mint: mint,
+          bondingCurve: bondingCurvePDA,
+          associatedBondingCurve: associatedBondingCurve,
+          associatedUser: associatedUser,
+          user: userPublicKey,
+          systemProgram: systemProgram,
+          tokenProgram: tokenProgram,
+          rent: rent,
+          eventAuthority: eventAuthority,
+          program: program
+        })
+        .transaction());
+        
+    } catch (pubkeyErr) {
+      console.error('❌ PublicKey creation failed:', pubkeyErr.message);
+      throw pubkeyErr;
+    }
     
     return transaction;
   } catch (err) {
