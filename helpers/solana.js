@@ -116,32 +116,71 @@ async function executeAtomicCreateAndBuy(connection, sdk, mainKeypair, mintKeypa
     
     console.log(`✅ SOL balance check passed: ${(balance / LAMPORTS_PER_SOL).toFixed(4)} SOL available`);
 
-    // 1. Get standard Create instructions
-    console.log('🔍 Debug - Getting create instructions...');
-    const createIxs = await sdk.getCreateInstructions(
-      mainKeypair.publicKey,
-      tokenName,
-      symbol,
-      metadataUri,
-      mintKeypair
-    );
+    // 1. MANUAL CREATE INSTRUCTIONS (bypass broken SDK)
+    console.log('  Building MANUAL create instructions...');
     
-    console.log('🔍 Debug - Raw createIxs result:');
-    console.log('createIxs:', createIxs);
-    console.log('createIxs type:', typeof createIxs);
-    console.log('createIxs isArray:', Array.isArray(createIxs));
-    if (Array.isArray(createIxs)) {
-      console.log('createIxs length:', createIxs.length);
-      createIxs.forEach((ix, index) => {
-        console.log(`Create instruction ${index}:`, {
-          programId: ix.programId?.toString() || 'undefined',
-          keys: ix.keys?.length || 0,
-          data: ix.data?.length || 0,
-          hasProgramId: !!ix.programId,
-          hasKeys: !!ix.keys
-        });
-      });
-    }
+    // Manual token creation instructions based on Pump.fun contract structure
+    const createInstructions = [];
+    
+    // Compute budget instructions
+    createInstructions.push(ComputeBudgetProgram.setComputeUnitLimit({ units: 800000 }));
+    createInstructions.push(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1500000 }));
+    
+    // Create mint account instruction
+    const createMintAccountIx = SystemProgram.createAccount({
+      fromPubkey: mainKeypair.publicKey,
+      newAccountPubkey: mintKeypair.publicKey,
+      lamports: 10000000, // 0.01 SOL for rent exemption
+      space: 82, // Mint account size
+    });
+    createInstructions.push(createMintAccountIx);
+    
+    // Initialize mint instruction
+    const initializeMintIx = await sdk.program.methods
+      .initializeMint(0, null, null, mainKeypair.publicKey)
+      .accounts({
+        mint: mintKeypair.publicKey,
+        systemProgram: SystemProgram.programId,
+        rent: new PublicKey("SysvarRent111111111111111111111111111111"),
+        tokenProgram: new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"),
+      })
+      .instruction();
+    createInstructions.push(initializeMintIx);
+    
+    // Create metadata account instruction
+    const [metadataAccount] = PublicKey.findProgramAddressSync([
+      Buffer.from("metadata"),
+      mintKeypair.publicKey.toBuffer()
+    ], new PublicKey("metaqbxxUerdq28cj1RbAWkYQm3x6dC"));
+    
+    const createMetadataAccountIx = SystemProgram.createAccount({
+      fromPubkey: mainKeypair.publicKey,
+      newAccountPubkey: metadataAccount,
+      lamports: 10000000, // 0.01 SOL for rent exemption
+      space: 1000, // Metadata account size
+    });
+    createInstructions.push(createMetadataAccountIx);
+    
+    // Initialize metadata instruction
+    const createMetadataIx = await sdk.program.methods
+      .createMetadata(
+        tokenName,
+        symbol,
+        "https://ipfs.io/ipfs/" + metadataUri.split("/").pop(),
+        null
+      )
+      .accounts({
+        metadata: metadataAccount,
+        mint: mintKeypair.publicKey,
+        mintAuthority: mainKeypair.publicKey,
+        payer: mainKeypair.publicKey,
+        systemProgram: SystemProgram.programId,
+        rent: new PublicKey("SysvarRent111111111111111111111111111111"),
+      })
+      .instruction();
+    createInstructions.push(createMetadataIx);
+    
+    console.log(`✅ Created ${createInstructions.length} manual create instructions`);
 
     // 2. Prepare Buy Instruction (Manual Construction)
     const globalAccount = await sdk.getGlobalAccount('confirmed');
@@ -189,26 +228,9 @@ async function executeAtomicCreateAndBuy(connection, sdk, mainKeypair, mintKeypa
       lamports: 1000000, // 0.001 SOL
     });
 
-    // 4. Combine all instructions - handle single instruction vs array
-    const createInstructionsArray = Array.isArray(createIxs) ? createIxs : [createIxs];
-    
-    console.log('🔍 Debug - createIxs structure:');
-    console.log(`createIxs type: ${typeof createIxs}`);
-    console.log(`createIxs isArray: ${Array.isArray(createIxs)}`);
-    console.log(`createInstructionsArray length: ${createInstructionsArray.length}`);
-    
-    createInstructionsArray.forEach((ix, index) => {
-      console.log(`Create instruction ${index}:`, {
-        programId: ix.programId?.toString() || 'unknown',
-        keys: ix.keys?.length || 0,
-        data: ix.data?.length || 0
-      });
-    });
-    
+    // 4. Combine all instructions - use MANUAL create instructions
     const allInstructions = [
-      ComputeBudgetProgram.setComputeUnitLimit({ units: 800000 }),
-      ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1500000 }),
-      ...createInstructionsArray,
+      ...createInstructions, // Manual create instructions (not from SDK)
       buyIx,
       tipIx
     ];
@@ -282,18 +304,23 @@ async function sendJitoBundle({ payer, instructions, connection, additionalSigne
         }).compileToV0Message();
 
         const tx1 = new VersionedTransaction(msg1);
-        
-        // Check if any instruction actually needs the mintKeypair as signer
-        const needsMintKeypair = createInstructions.some(ix => 
-          ix.keys?.some(key => key.isSigner && key.pubkey?.toString() === additionalSigners[0]?.publicKey?.toString())
+
+        // Check if any instruction actually needs mintKeypair as signer
+        const needsMintKeypair = createInstructions.some(ix =>
+          (ix.keys && ix.keys.some(key =>
+            key.isSigner && key.pubkey?.toString() === additionalSigners[0]?.publicKey?.toString()
+          )) ||
+          (ix.programId?.toString() !== 'ComputeBudget111111111111111111111111111' &&
+            ix.programId?.toString() !== '11111111111111111111111111111111')
         );
-        
+
         console.log('📝 Signing CREATE transaction:', {
           payer: payer.publicKey.toString(),
           needsMintKeypair: needsMintKeypair,
-          additionalSigners: additionalSigners.map(s => s.publicKey.toString())
+          additionalSigners: additionalSigners.map(s => s.publicKey.toString()),
+          createInstructionsCount: createInstructions.length
         });
-        
+
         if (needsMintKeypair && additionalSigners.length > 0) {
           // Sign with payer AND mintKeypair for token creation
           tx1.sign([payer, ...additionalSigners]);
