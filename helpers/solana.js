@@ -230,22 +230,32 @@ async function handleDeployRequest(bot, connection, data, chatId, session, termM
       session.tradeConfig = {}; // Reset trade config
     }
 
-    // Create token and atomic dev buy if needed
-    let createTx;
-    
+    // Pre-calculate estimated token amount for logs (upfront, no chain read)
+    const VIRT_SOL  = BigInt(30_000_000_000);
+    const VIRT_TOKS = BigInt(1_073_000_191) * BigInt(1_000_000);
+    const estRawToks  = (VIRT_TOKS * devBuyLamports) / (VIRT_SOL + devBuyLamports);
+    const estDevTokens = (Number(estRawToks) / 1e6).toLocaleString('en-US', { maximumFractionDigits: 0 });
+
+    let deploymentSig;
+
     if (devBuyLamports > 0n) {
-      // Dev buy is bundled with token creation in one TX — dev wallet is guaranteed first buyer.
-      console.log(`🚀 Creating token with atomic dev buy (${initialBuy} SOL) — dev is first buyer`);
+      // ─────────────────────────────────────────────────────────────────
+      // ATOMIC CREATE + DEV BUY
+      // Mirror the SDK's own createAndBuy sendTx flow exactly:
+      //   1. Build legacy Transaction with all instructions
+      //   2. Compile to VersionedTransaction (V0 message)
+      //   3. Sign + send — this matches how the pump.fun Anchor program
+      //      expects account metas to be compiled.
+      // ─────────────────────────────────────────────────────────────────
+      console.log(`🚀 Atomic create+buy (${initialBuy} SOL) — dev is first buyer`);
 
-      // Pre-calculate estimated token amount using pump.fun's actual initial reserves
-      // virtualSolReserves = 30 SOL, virtualTokenReserves = 1,073,000,191 tokens (6 decimals)
-      const VIRT_SOL   = BigInt(30_000_000_000);
-      const VIRT_TOKS  = BigInt(1_073_000_191) * BigInt(1_000_000);
-      const estRawToks = (VIRT_TOKS * devBuyLamports) / (VIRT_SOL + devBuyLamports);
-      const estDevTokens = (Number(estRawToks) / 1e6).toLocaleString('en-US', { maximumFractionDigits: 0 });
+      session.liveLogs.push({
+        status: 'processing',
+        message: `🏗 Creating ${symbol} with atomic dev buy (${initialBuy} SOL ≈ ${estDevTokens} tokens)...`
+      });
 
-      // Get create instructions
-      const createInstructions = await sdk.getCreateInstructions(
+      // Step 1 — create instruction (returns a Transaction per SDK source)
+      const createTx = await sdk.getCreateInstructions(
         mainKeypair.publicKey,
         tokenName,
         symbol,
@@ -253,13 +263,12 @@ async function handleDeployRequest(bot, connection, data, chatId, session, termM
         mintKeypair
       );
 
-      // Get dev buy instructions (bundled in same TX — dev is first buyer)
+      // Step 2 — buy instruction (returns a Transaction with optional ATA + buy)
       const globalAccount = await sdk.getGlobalAccount('confirmed');
       const buyAmount = globalAccount.getInitialBuyPrice(devBuyLamports);
       const { calculateWithSlippageBuy } = require('pumpdotfun-sdk/dist/cjs/util');
       const buyAmountWithSlippage = calculateWithSlippageBuy(devBuyLamports, 500n);
-
-      const buyInstructions = await sdk.getBuyInstructions(
+      const buyTx = await sdk.getBuyInstructions(
         mainKeypair.publicKey,
         mintKeypair.publicKey,
         globalAccount.feeRecipient,
@@ -267,50 +276,70 @@ async function handleDeployRequest(bot, connection, data, chatId, session, termM
         buyAmountWithSlippage
       );
 
-      // Combine create + buy into one TX — guarantees dev is first buyer on-chain
-      const combinedInstructions = [createInstructions, buyInstructions];
-      createTx = combinedInstructions;
+      // Step 3 — combine into one legacy Transaction (same as SDK createAndBuy line 30-36)
+      const { Transaction: SolTx, ComputeBudgetProgram: CBP,
+              TransactionMessage, VersionedTransaction } = require('@solana/web3.js');
+      const combinedTx = new SolTx();
+      combinedTx.add(CBP.setComputeUnitLimit({ units: 600000 }));
+      combinedTx.add(CBP.setComputeUnitPrice({ microLamports: 250000 }));
+      combinedTx.add(createTx);  // Transaction → adds all its instructions
+      combinedTx.add(buyTx);     // Transaction → adds ATA + buy instructions
 
-      session.liveLogs.push({
-        status: 'processing',
-        message: `🏗 Creating ${symbol} — Dev buy (${initialBuy} SOL ≈ ${estDevTokens} tokens) bundled in same TX...`
-      });
+      // Step 4 — compile to V0 VersionedTransaction (SDK's buildVersionedTx)
+      const { blockhash } = await connection.getLatestBlockhash('confirmed');
+      const messageV0 = new TransactionMessage({
+        payerKey:        mainKeypair.publicKey,
+        recentBlockhash: blockhash,
+        instructions:    combinedTx.instructions,
+      }).compileToV0Message();
+      const versionedTx = new VersionedTransaction(messageV0);
+
+      // Step 5 — sign with both required keypairs (creator + mint)
+      versionedTx.sign([mainKeypair, mintKeypair]);
+
+      // Step 6 — send (skipPreflight false, same as SDK)
+      const sig = await connection.sendTransaction(versionedTx, { skipPreflight: false });
+      console.log(`🔗 Create+buy TX: https://solscan.io/tx/${sig}`);
+
+      // Confirm
+      const latestBlockhash = await connection.getLatestBlockhash();
+      await connection.confirmTransaction({
+        blockhash:           latestBlockhash.blockhash,
+        lastValidBlockHeight: latestBlockhash.lastValidBlockHeight,
+        signature:           sig,
+      }, 'confirmed');
+
+      deploymentSig = sig;
+
     } else {
-      // Create token only (no dev buy - no Jito needed)
-      createTx = await sdk.getCreateInstructions(
+      // ─────────────────────────────────────────
+      // CREATE ONLY — no dev buy
+      // ─────────────────────────────────────────
+      session.liveLogs.push({ status: 'processing', message: `🏗 Creating ${symbol} token...` });
+
+      const createInstruction = await sdk.getCreateInstructions(
         mainKeypair.publicKey,
         tokenName,
         symbol,
         metadataUri,
         mintKeypair
       );
-      
-      session.liveLogs.push({ status: 'processing', message: `🏗 Creating ${symbol} token...` });
+
+      deploymentSig = await buildAndSendTx(
+        connection,
+        Array.isArray(createInstruction) ? createInstruction : [createInstruction],
+        mainKeypair.publicKey,
+        [mainKeypair, mintKeypair],
+        { unitLimit: 300000, unitPrice: 250000 }
+      );
     }
 
-    console.log(`🚀 Sending deployment tx | mint: ${mintAddress} | atomic dev buy: ${devBuyLamports > 0n ? 'MANDATORY' : 'NO'}`);
-
-    const deploymentSig = await buildAndSendTx(
-      connection,
-      Array.isArray(createTx) ? createTx.flatMap(tx => tx.instructions || tx) : [createTx],
-      mainKeypair.publicKey,
-      [mainKeypair, mintKeypair],
-      priorityFees
-    );
-
     console.log(`✅ Token deployed! Signature: ${deploymentSig}`);
-    session.liveLogs.push({ status: 'success', message: `🚀 Token Deployed! TX: ${deploymentSig.slice(0, 16)}...` });
+    session.liveLogs.push({ status: 'success', message: `🚀 Token Deployed! TX: ${String(deploymentSig).slice(0, 16)}...` });
 
-    // If dev buy was included atomically, confirm first-buyer status
     if (devBuyLamports > 0n) {
-      // Re-use the same upfront formula for the success message
-      const VIRT_SOL   = BigInt(30_000_000_000);
-      const VIRT_TOKS  = BigInt(1_073_000_191) * BigInt(1_000_000);
-      const estRawToks = (VIRT_TOKS * devBuyLamports) / (VIRT_SOL + devBuyLamports);
-      const estDevTokens = (Number(estRawToks) / 1e6).toLocaleString('en-US', { maximumFractionDigits: 0 });
-
       session.liveLogs.push({ status: 'success', message: `💰 Dev Buy Complete! ${initialBuy} SOL → ~${estDevTokens} tokens` });
-      session.liveLogs.push({ status: 'success', message: `👑 Dev wallet is FIRST BUYER ✅ (bundled with create TX)` });
+      session.liveLogs.push({ status: 'success', message: `👑 Dev wallet is FIRST BUYER ✅ (same TX as create)` });
     }
 
     session.liveLogs.push({ status: 'completed', message: `✅ ${symbol} token successfully created` });
