@@ -5,6 +5,7 @@ const {
   Keypair, 
   TransactionMessage, 
   VersionedTransaction, 
+  Transaction,
   SystemProgram, 
   LAMPORTS_PER_SOL, 
   ComputeBudgetProgram 
@@ -247,7 +248,14 @@ async function sendJitoBundle({ payer, instructions, connection, additionalSigne
       if (!json.result) throw new Error('No result returned from Jito bundle');
 
       console.log('✅ Bundle sent successfully:', json.result);
-      return { success: true, signature: base58Encode(tx.signatures[0]) };
+      
+      // Fix: Check if signatures exist and get the first one
+      const signature = tx.signatures && tx.signatures.length > 0 ? tx.signatures[0] : null;
+      if (!signature) {
+        throw new Error('No signature found in transaction');
+      }
+      
+      return { success: true, signature: base58Encode(signature) };
       
     } catch (err) {
       console.error(`❌ Bundle attempt ${attempt} failed:`, err.message);
