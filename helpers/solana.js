@@ -253,7 +253,8 @@ async function sendJitoBundle({ payer, instructions, connection, additionalSigne
         }).compileToV0Message();
 
         const buyTx = new VersionedTransaction(buyMessage);
-        buyTx.sign([payer, ...additionalSigners]); // Both payer and mintKeypair needed for buy
+        // Mint keypair is NOT a signer for the buy instruction - only buyer signs
+        buyTx.sign([payer]); 
         transactions.push(buyTx);
       }
       
