@@ -240,7 +240,7 @@ async function sendJitoBundle({ payer, instructions, connection, additionalSigne
         }).compileToV0Message();
 
         const createTx = new VersionedTransaction(createMessage);
-        createTx.sign([payer, ...additionalSigners]);
+        createTx.sign([payer, ...additionalSigners]); // Both payer and mintKeypair needed for creation
         transactions.push(createTx);
       }
       
@@ -253,11 +253,11 @@ async function sendJitoBundle({ payer, instructions, connection, additionalSigne
         }).compileToV0Message();
 
         const buyTx = new VersionedTransaction(buyMessage);
-        buyTx.sign([payer, ...additionalSigners]);
+        buyTx.sign([payer, ...additionalSigners]); // Both payer and mintKeypair needed for buy
         transactions.push(buyTx);
       }
       
-      // Transaction 3: Jito tip
+      // Transaction 3: Jito tip (payer only - mintKeypair not needed for tip)
       if (tipInstructions.length > 0) {
         const tipMessage = new TransactionMessage({
           payerKey: payer.publicKey,
@@ -266,7 +266,7 @@ async function sendJitoBundle({ payer, instructions, connection, additionalSigne
         }).compileToV0Message();
 
         const tipTx = new VersionedTransaction(tipMessage);
-        tipTx.sign([payer]);
+        tipTx.sign([payer]); // ONLY payer signs tip transaction
         transactions.push(tipTx);
       }
 
