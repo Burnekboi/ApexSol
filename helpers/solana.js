@@ -896,8 +896,10 @@ async function buildBuyInstruction(connection, userPublicKey, mint, tokenAmount,
       const tokenProgram = new PublicKey('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
       console.log('✅ tokenProgram created');
       
-      const rent = new PublicKey('SysvarRent111111111111111111111111111111');
-      console.log('✅ rent created');
+      // Use proper rent sysvar constant
+      const { SYSVAR_RENT_PUBKEY } = require('@solana/web3.js');
+      const rent = SYSVAR_RENT_PUBKEY;
+      console.log('✅ rent created:', rent.toString());
       
       const eventAuthority = new PublicKey('Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasjjnr7XxXp9F1');
       console.log('✅ eventAuthority created');
@@ -925,6 +927,7 @@ async function buildBuyInstruction(connection, userPublicKey, mint, tokenAmount,
         
     } catch (pubkeyErr) {
       console.error('❌ PublicKey creation failed:', pubkeyErr.message);
+      console.error('❌ Error details:', pubkeyErr);
       throw pubkeyErr;
     }
     
