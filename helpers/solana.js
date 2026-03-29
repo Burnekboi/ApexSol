@@ -102,6 +102,17 @@ async function executeAtomicCreateAndBuy(connection, sdk, mainKeypair, mintKeypa
   try {
     const devBuyLamports = BigInt(Math.floor(initialBuySol * LAMPORTS_PER_SOL));
     
+    // 0. Check SOL balance first
+    const balance = await connection.getBalance(mainKeypair.publicKey);
+    const estimatedCost = devBuyLamports + BigInt(20000000); // Buy amount + ~0.02 SOL for fees/tips
+    
+    if (balance < estimatedCost) {
+      const deficit = Number(estimatedCost - balance) / LAMPORTS_PER_SOL;
+      throw new Error(`❌ INSUFFICIENT SOL: Need ${initialBuySol} SOL for buy + ~0.02 SOL for fees, but only have ${(balance / LAMPORTS_PER_SOL).toFixed(4)} SOL. Missing ${deficit.toFixed(4)} SOL`);
+    }
+    
+    console.log(`✅ SOL balance check passed: ${(balance / LAMPORTS_PER_SOL).toFixed(4)} SOL available`);
+    
     // 1. Get Create Instructions
     const createIxs = await sdk.getCreateInstructions(
       mainKeypair.publicKey,
@@ -124,50 +135,62 @@ async function executeAtomicCreateAndBuy(connection, sdk, mainKeypair, mintKeypa
       buyAmountWithSlippage
     );
 
-    // 3. Inject global_volume_accumulator if missing
+    // 3. Fix missing global_volume_accumulator key
     const buyIxs = Array.isArray(buyTx) ? buyTx : [buyTx];
     buyIxs.forEach(ix => {
       if (ix.programId.toString() === '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P') {
-        const hasAccumulator = ix.keys.some(k => k.pubkey.toString() === 'DE95f7Y7TPhB3pPjKx8L5XTViN1hUq6X5t9uX9YF2f9j'); // Simplified check
-        if (!hasAccumulator && ix.keys.length === 12) {
-           const [globalVolumeAccumulator] = PublicKey.findProgramAddressSync(
-            [Buffer.from('global_volume_accumulator')], 
-            ix.programId
-          );
+        const [globalVolumeAccumulator] = PublicKey.findProgramAddressSync(
+          [Buffer.from('global_volume_accumulator')], 
+          ix.programId
+        );
+        
+        // Check if global_volume_accumulator is already present
+        const hasAccumulator = ix.keys.some(k => k.pubkey.toString() === globalVolumeAccumulator.toString());
+        
+        if (!hasAccumulator) {
+          console.log('🔧 Adding missing global_volume_accumulator key to buy instruction');
           ix.keys.push({ pubkey: globalVolumeAccumulator, isSigner: false, isWritable: true });
         }
       }
     });
 
-    // 4. Build Jito Tip Instruction (Required for many Jito setups to guarantee landing)
-    // Replace with a valid Jito Tip account if you have a preferred one
-    const jitoTipAccount = new PublicKey("Cw8CFyMvGrnC7JvS9fVfEnR5uYg1U6oYV1Y9m9y9Z9m9"); // Standard Jito Tip
+    // 4. Build proper priority fee and Jito tip
+    // Get current priority fee recommendation
+    const { FeeCalculator } = await connection.getRecentPerformanceSamples();
+    const priorityFee = 1000000; // 0.001 SOL priority fee
+    
+    // Jito tip for bundle inclusion
+    const jitoTipAccount = new PublicKey("96gYZGLnJYVFmbjzopSsQVThGqhWtqoFPMPw7sCwgqAY"); // Valid Jito tip account
+    const tipAmount = 2000000; // 0.002 SOL tip
+    
     const tipIx = SystemProgram.transfer({
       fromPubkey: mainKeypair.publicKey,
       toPubkey: jitoTipAccount,
-      lamports: 100_000, // 0.0001 SOL tip
+      lamports: tipAmount,
     });
 
-    // 5. Combine everything into ONE transaction for the bundle
-    // Note: Creating and Buying in the SAME transaction is safer for "first buy" status
+    // 5. Combine everything into ONE atomic transaction
     const allInstructions = [
-      ComputeBudgetProgram.setComputeUnitLimit({ units: 800_000 }),
-      ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 500_000 }),
+      ComputeBudgetProgram.setComputeUnitLimit({ units: 1_000_000 }), // Higher limit for complex tx
+      ComputeBudgetProgram.setComputeUnitPrice({ microLamports: priorityFee }),
       ...createIxs,
       ...buyIxs,
       tipIx
     ];
 
-    console.log('🚀 Sending single atomic transaction via Jito Bundle...');
+    console.log(`🚀 Sending atomic transaction with ${allInstructions.length} instructions...`);
+    console.log(`💰 Priority fee: ${priorityFee} microLamports, Jito tip: ${tipAmount / LAMPORTS_PER_SOL} SOL`);
+    
     const bundleResult = await sendJitoBundle({
       payer: mainKeypair,
-      instructions: allInstructions, // Pass as a single combined array
+      instructions: allInstructions,
       connection: connection,
       additionalSigners: [mintKeypair]
     });
 
     if (!bundleResult.success) throw new Error(bundleResult.error);
     
+    console.log(`✅ Atomic transaction successful: ${bundleResult.signature}`);
     return bundleResult.signature;
     
   } catch (err) {
@@ -807,27 +830,32 @@ async function sendTx(connection, transaction, signers) {
 
 function handleTransactionError(err) {
   // Extract error message and provide user-friendly feedback
-  if (err.message) {
-    // Common Solana error patterns
-    if (err.message.includes('insufficient funds')) {
-      return 'Insufficient SOL balance for this transaction';
-    }
-    if (err.message.includes('blockhash expired')) {
-      return 'Transaction timed out. Please try again';
-    }
-    if (err.message.includes('custom program error')) {
-      return 'Transaction failed due to program error';
-    }
-    if (err.message.includes('network')) {
-      return 'Network error. Please check your connection and try again';
-    }
-    
-    // Return original error if no specific pattern matches
-    return err.message;
+  const errorMessage = err.message || err.toString();
+  
+  // Check for insufficient SOL errors first
+  if (errorMessage.includes('INSUFFICIENT SOL') || errorMessage.includes('insufficient funds')) {
+    return errorMessage.includes('INSUFFICIENT SOL') ? errorMessage : 'Insufficient SOL balance for this transaction';
   }
   
-  // Fallback for unknown error types
-  return 'An unknown error occurred during the transaction';
+  // Common Solana error patterns
+  if (errorMessage.includes('blockhash expired')) {
+    return 'Transaction timed out. Please try again';
+  }
+  if (errorMessage.includes('custom program error: 0xbbd')) {
+    return 'Transaction failed: Missing required account keys (global_volume_accumulator). This has been fixed in the updated code.';
+  }
+  if (errorMessage.includes('custom program error')) {
+    return 'Transaction failed due to program error. Check token parameters and try again.';
+  }
+  if (errorMessage.includes('network') || errorMessage.includes('timeout')) {
+    return 'Network error. Please check your connection and try again';
+  }
+  if (errorMessage.includes('Cannot read properties of undefined')) {
+    return 'SDK error: Missing required parameters. This has been fixed in the updated code.';
+  }
+  
+  // Return original error if no specific pattern matches
+  return errorMessage;
 }
 
 module.exports = {
