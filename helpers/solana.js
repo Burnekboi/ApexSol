@@ -136,12 +136,17 @@ async function executeAtomicCreateAndBuy(connection, sdk, mainKeypair, mintKeypa
     createInstructions.push(createMintAccountIx);
     
     // Initialize mint instruction
+    console.log('🔧 Building initializeMint instruction...');
+    if (!mintKeypair || !mintKeypair.publicKey) {
+      throw new Error('mintKeypair is undefined or missing publicKey');
+    }
+    
     const initializeMintIx = await sdk.program.methods
       .initializeMint(0, null, null, mainKeypair.publicKey)
       .accounts({
         mint: mintKeypair.publicKey,
         systemProgram: SystemProgram.programId,
-        rent: new PublicKey("SysvarRent111111111111111111111111111111"),
+        rent: new PublicKey("SysvarRent111111111111111111111111111"),
         tokenProgram: new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"),
       })
       .instruction();
