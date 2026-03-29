@@ -174,6 +174,19 @@ async function executeAtomicCreateAndBuy(connection, sdk, mainKeypair, mintKeypa
     // 4. Combine all instructions - handle single instruction vs array
     const createInstructionsArray = Array.isArray(createIxs) ? createIxs : [createIxs];
     
+    console.log('🔍 Debug - createIxs structure:');
+    console.log(`createIxs type: ${typeof createIxs}`);
+    console.log(`createIxs isArray: ${Array.isArray(createIxs)}`);
+    console.log(`createInstructionsArray length: ${createInstructionsArray.length}`);
+    
+    createInstructionsArray.forEach((ix, index) => {
+      console.log(`Create instruction ${index}:`, {
+        programId: ix.programId?.toString() || 'unknown',
+        keys: ix.keys?.length || 0,
+        data: ix.data?.length || 0
+      });
+    });
+    
     const allInstructions = [
       ComputeBudgetProgram.setComputeUnitLimit({ units: 800000 }),
       ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1500000 }),
@@ -239,6 +252,11 @@ async function sendJitoBundle({ payer, instructions, connection, additionalSigne
       // ⚡ TX1: CREATE TOKEN (with compute budget + create instructions)
       if (createInstructions.length > 0) {
         console.log('🔧 Building CREATE transaction...');
+        console.log('🔍 Create instructions details:', createInstructions.map(ix => ({
+          programId: ix.programId?.toString() || 'unknown',
+          hasKeys: ix.keys?.length || 0
+        })));
+        
         const msg1 = new TransactionMessage({
           payerKey: payer.publicKey,
           recentBlockhash: blockhash,
@@ -246,12 +264,26 @@ async function sendJitoBundle({ payer, instructions, connection, additionalSigne
         }).compileToV0Message();
 
         const tx1 = new VersionedTransaction(msg1);
-        console.log('📝 Signing CREATE transaction with:', {
+        
+        // Check if any instruction actually needs the mintKeypair as signer
+        const needsMintKeypair = createInstructions.some(ix => 
+          ix.keys?.some(key => key.isSigner && key.pubkey?.toString() === additionalSigners[0]?.publicKey?.toString())
+        );
+        
+        console.log('📝 Signing CREATE transaction:', {
           payer: payer.publicKey.toString(),
+          needsMintKeypair: needsMintKeypair,
           additionalSigners: additionalSigners.map(s => s.publicKey.toString())
         });
-        // Sign with payer AND mintKeypair for token creation
-        tx1.sign([payer, ...additionalSigners]);
+        
+        if (needsMintKeypair && additionalSigners.length > 0) {
+          // Sign with payer AND mintKeypair for token creation
+          tx1.sign([payer, ...additionalSigners]);
+        } else {
+          // Only sign with payer if mintKeypair not needed
+          tx1.sign([payer]);
+        }
+        
         console.log('✅ CREATE transaction signed successfully');
         transactions.push(tx1);
       }
