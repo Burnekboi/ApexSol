@@ -190,20 +190,32 @@ async function executeAtomicCreateAndBuy(connection, sdk, mainKeypair, mintKeypa
       lamports: 1000000, // 0.001 SOL
     });
 
-    // 4. Combine all instructions - use MANUAL create instructions
+    // 4. Combine all instructions into a single Atomic Set
     const allInstructions = [
-      ...createInstructions, // Manual create instructions (not from SDK)
+      ...createInstructions, 
       buyIx,
       tipIx
     ];
 
-    console.log(`🚀 Sending Atomic Bundle with ${allInstructions.length} instructions...`);
+    console.log(`🚀 Creating Atomic VersionedTransaction with ${allInstructions.length} instructions...`);
     
+    // 5. Compile into a Versioned Transaction
+    const { blockhash } = await connection.getLatestBlockhash("finalized");
+    const messageV0 = new TransactionMessage({
+        payerKey: mainKeypair.publicKey,
+        recentBlockhash: blockhash,
+        instructions: allInstructions,
+    }).compileToV0Message();
+    
+    const transaction = new VersionedTransaction(messageV0);
+
+    // 6. Sign with both the Payer and the Mint Keypair
+    transaction.sign([mainKeypair, mintKeypair]);
+    
+    // 7. Execute via your Jito function
     const result = await sendJitoBundle({
-      payer: mainKeypair,
-      instructions: allInstructions,
-      connection: connection,
-      additionalSigners: [mintKeypair] // Pass mintKeypair for create transaction
+      transactions: [transaction],
+      maxRetries: 3
     });
 
     if (!result.success) throw new Error(result.error);
@@ -220,133 +232,15 @@ async function executeAtomicCreateAndBuy(connection, sdk, mainKeypair, mintKeypa
 /**
  * 📦 IMPROVED JITO BUNDLE SENDER
  */
-async function sendJitoBundle({ payer, instructions, connection, additionalSigners = [], maxRetries = 3 }) {
+async function sendJitoBundle({ transactions, maxRetries = 3 }) {
+  const bs58 = require('bs58');
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
-      const { blockhash } = await connection.getLatestBlockhash("finalized");
-
-      // 🧱 Separate instructions into logical groups
-      const createInstructions = [];
-      const buyInstructions = [];
-      const tipInstructions = [];
+      console.log('🔍 Debug - Building Jito bundle payload...');
       
-      console.log('🔍 Debugging instruction grouping:');
-      instructions.forEach((ix, index) => {
-        const programId = ix.programId?.toString() || 'unknown';
-        const isPumpFun = programId === '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P';
-        const isTip = ix.keys?.some(k => k.pubkey?.toString()?.includes('Cw8CFyMv'));
-        
-        console.log(`Instruction ${index}: ${programId} (pump.fun: ${isPumpFun}, tip: ${isTip})`);
-        
-        if (isPumpFun) {
-          buyInstructions.push(ix);
-        } else if (isTip) {
-          tipInstructions.push(ix);
-        } else {
-          createInstructions.push(ix);
-        }
-      });
-      
-      console.log(`📊 Grouped: ${createInstructions.length} create, ${buyInstructions.length} buy, ${tipInstructions.length} tip`);
-
-      const transactions = [];
-
-      // ⚡ TX1: CREATE TOKEN (with compute budget + create instructions)
-      if (createInstructions.length > 0) {
-        console.log('🔧 Building CREATE transaction...');
-        console.log('🔍 Create instructions details:', createInstructions.map(ix => ({
-          programId: ix.programId?.toString() || 'unknown',
-          hasKeys: ix.keys?.length || 0
-        })));
-        
-        const msg1 = new TransactionMessage({
-          payerKey: payer.publicKey,
-          recentBlockhash: blockhash,
-          instructions: createInstructions,
-        }).compileToV0Message();
-
-        const tx1 = new VersionedTransaction(msg1);
-
-        // Check if any instruction actually needs mintKeypair as signer
-        const needsMintKeypair = createInstructions.some(ix =>
-          (ix.keys && ix.keys.some(key =>
-            key.isSigner && key.pubkey?.toString() === additionalSigners[0]?.publicKey?.toString()
-          )) ||
-          (ix.programId?.toString() !== 'ComputeBudget111111111111111111111111111' &&
-            ix.programId?.toString() !== '11111111111111111111111111111111')
-        );
-
-        console.log('📝 Signing CREATE transaction:', {
-          payer: payer.publicKey.toString(),
-          needsMintKeypair: needsMintKeypair,
-          additionalSigners: additionalSigners.map(s => s.publicKey.toString()),
-          createInstructionsCount: createInstructions.length
-        });
-
-        if (needsMintKeypair && additionalSigners.length > 0) {
-          // Sign with payer AND mintKeypair for token creation
-          tx1.sign([payer, ...additionalSigners]);
-        } else {
-          // Only sign with payer if mintKeypair not needed
-          tx1.sign([payer]);
-        }
-        
-        console.log('✅ CREATE transaction signed successfully');
-        transactions.push(tx1);
-      }
-
-      // ⚡ TX2: BUY TOKEN (with compute budget + buy instructions)
-      if (buyInstructions.length > 0) {
-        console.log('🔧 Building BUY transaction...');
-        const msg2 = new TransactionMessage({
-          payerKey: payer.publicKey,
-          recentBlockhash: blockhash, // SAME BLOCKHASH
-          instructions: buyInstructions,
-        }).compileToV0Message();
-
-        const tx2 = new VersionedTransaction(msg2);
-        console.log('📝 Signing BUY transaction with:', {
-          payer: payer.publicKey.toString()
-        });
-        // ONLY payer signs buy transaction
-        tx2.sign([payer]);
-        console.log('✅ BUY transaction signed successfully');
-        transactions.push(tx2);
-      }
-
-      // ⚡ TX3: JITO TIP
-      if (tipInstructions.length > 0) {
-        console.log('🔧 Building TIP transaction...');
-        const msgTip = new TransactionMessage({
-          payerKey: payer.publicKey,
-          recentBlockhash: blockhash, // SAME BLOCKHASH
-          instructions: tipInstructions,
-        }).compileToV0Message();
-
-        const txTip = new VersionedTransaction(msgTip);
-        console.log('📝 Signing TIP transaction with:', {
-          payer: payer.publicKey.toString()
-        });
-        // ONLY payer signs tip transaction
-        txTip.sign([payer]);
-        console.log('✅ TIP transaction signed successfully');
-        transactions.push(txTip);
-      }
-
-      // 📦 BUNDLE ORDER: CREATE → BUY → TIP
-      console.log('🔍 Debug - Building bundle...');
-      console.log('Transactions count:', transactions.length);
-      
-      const bundle = transactions.map((tx, index) => {
-        console.log(`Serializing transaction ${index}...`);
-        try {
-          const serialized = Buffer.from(tx.serialize()).toString("base64");
-          console.log(`Transaction ${index} serialized successfully`);
-          return serialized;
-        } catch (err) {
-          console.error(`Error serializing transaction ${index}:`, err);
-          throw new Error(`Failed to serialize transaction ${index}: ${err.message}`);
-        }
+      const bundle = transactions.map(tx => {
+        // Force base58 encoding for Jito Engine
+        return bs58.default ? bs58.default.encode(tx.serialize()) : bs58.encode(tx.serialize());
       });
 
       // 🚀 SEND TO JITO
@@ -832,15 +726,11 @@ async function sellTokenAmount(bot, connection, buyer, sellAmount, contractAddre
     if (sellTx && sellTx.instructions) {
       sellTx.instructions.forEach(ix => {
         if (ix.programId.equals(PUMP_PROGRAM)) {
-          const [globalVolumeAccumulator] = PublicKey.findProgramAddressSync(
-            [Buffer.from('global_volume_accumulator')], 
-            PUMP_PROGRAM
-          );
-          ix.keys.push({
-            pubkey: globalVolumeAccumulator,
-            isSigner: false,
-            isWritable: true
-          });
+          const [globalVolumeAccumulator] = PublicKey.findProgramAddressSync([Buffer.from('global_volume_accumulator')], PUMP_PROGRAM);
+          const [bondingCurveV2] = PublicKey.findProgramAddressSync([Buffer.from('bonding-curve-v2'), typeof mint === 'string' ? new PublicKey(mint).toBuffer() : mint.toBuffer()], PUMP_PROGRAM);
+          
+          ix.keys.push({ pubkey: globalVolumeAccumulator, isSigner: false, isWritable: true });
+          ix.keys.push({ pubkey: bondingCurveV2, isSigner: false, isWritable: true });
         }
       });
     }
@@ -905,15 +795,11 @@ async function buildBuyInstruction(connection, userPublicKey, mint, tokenAmount,
     if (buyTx && buyTx.instructions) {
       buyTx.instructions.forEach(ix => {
         if (ix.programId.equals(PUMP_PROGRAM)) {
-          const [globalVolumeAccumulator] = PublicKey.findProgramAddressSync(
-            [Buffer.from('global_volume_accumulator')], 
-            PUMP_PROGRAM
-          );
-          ix.keys.push({
-            pubkey: globalVolumeAccumulator,
-            isSigner: false,
-            isWritable: true
-          });
+          const [globalVolumeAccumulator] = PublicKey.findProgramAddressSync([Buffer.from('global_volume_accumulator')], PUMP_PROGRAM);
+          const [bondingCurveV2] = PublicKey.findProgramAddressSync([Buffer.from('bonding-curve-v2'), typeof mint === 'string' ? new PublicKey(mint).toBuffer() : mint.toBuffer()], PUMP_PROGRAM);
+          
+          ix.keys.push({ pubkey: globalVolumeAccumulator, isSigner: false, isWritable: true });
+          ix.keys.push({ pubkey: bondingCurveV2, isSigner: false, isWritable: true });
         }
       });
     }
