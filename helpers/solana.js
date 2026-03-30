@@ -156,10 +156,25 @@ async function executeAtomicCreateAndBuy(connection, sdk, mainKeypair, mintKeypa
     // THE FIX: Define 13th and 14th accounts
     const [globalVolumeAccumulator] = PublicKey.findProgramAddressSync([Buffer.from('global_volume_accumulator')], PUMP_PROGRAM);
     const [bondingCurveV2] = PublicKey.findProgramAddressSync([Buffer.from('bonding-curve-v2'), mintKeypair.publicKey.toBuffer()], PUMP_PROGRAM);
+    const [feeConfig] = PublicKey.findProgramAddressSync([Buffer.from('fee_config')], PUMP_PROGRAM);
+    const feeProgram = new PublicKey("pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ");
+    
+    // Additional required accounts for pump.fun upgrade
+    let creatorPubkey = new PublicKey("11111111111111111111111111111111");
+    try {
+      const bcData = await getBondingCurveData(connection, mintKeypair.publicKey);
+      if (bcData && bcData.creator) creatorPubkey = bcData.creator;
+    } catch (e) {
+      console.error("Could not fetch creator for vault PDA");
+    }
+    const [creatorVault] = PublicKey.findProgramAddressSync([Buffer.from("creator-vault"), creatorPubkey.toBuffer()], PUMP_PROGRAM);
+    const [userVolumeAccumulator] = PublicKey.findProgramAddressSync([Buffer.from("user_volume_accumulator"), mainKeypair.publicKey.toBuffer()], PUMP_PROGRAM);
 
     console.log(`🔧 Bonding Curve: ${bondingCurve.toString()}`);
     console.log(`🔧 Global Volume Accumulator: ${globalVolumeAccumulator.toString()}`);
     console.log(`🔧 Bonding Curve V2: ${bondingCurveV2.toString()}`);
+    console.log(`🔧 Fee Config: ${feeConfig.toString()}`);
+    console.log(`🔧 Fee Program: ${feeProgram.toString()}`);
 
     const buyIx = await sdk.program.methods
       .buy(new anchor.BN(buyAmount.toString()), new anchor.BN(buyAmountWithSlippage.toString()))
@@ -178,7 +193,9 @@ async function executeAtomicCreateAndBuy(connection, sdk, mainKeypair, mintKeypa
         program: PUMP_PROGRAM,
       })
       .remainingAccounts([
+        { pubkey: creatorVault, isSigner: false, isWritable: true },
         { pubkey: globalVolumeAccumulator, isSigner: false, isWritable: true },
+        { pubkey: userVolumeAccumulator, isSigner: false, isWritable: true },
         { pubkey: bondingCurveV2, isSigner: false, isWritable: true },
         { pubkey: feeConfig, isSigner: false, isWritable: false },
         { pubkey: feeProgram, isSigner: false, isWritable: false },
@@ -232,47 +249,93 @@ async function executeAtomicCreateAndBuy(connection, sdk, mainKeypair, mintKeypa
 }
 
 /**
- * 📦 IMPROVED JITO BUNDLE SENDER
+ * 📦 ENHANCED JITO BUNDLE SENDER WITH PROPER ENDPOINTS
  */
 async function sendJitoBundle({ transactions, maxRetries = 3 }) {
   const bs58 = require('bs58');
+  
+  // Multiple Jito endpoints for redundancy
+  const jitoEndpoints = [
+    'https://mainnet.block-engine.jito.wtf/api/v1/bundles',
+    'https://ny.mainnet.block-engine.jito.wtf/api/v1/bundles',
+    'https://tokyo.mainnet.block-engine.jito.wtf/api/v1/bundles'
+  ];
+  
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    try {
-      console.log('🔍 Debug - Building Jito bundle payload...');
-      
-      const bundle = transactions.map(tx => {
-        // Force base58 encoding for Jito Engine
-        return bs58.default ? bs58.default.encode(tx.serialize()) : bs58.encode(tx.serialize());
-      });
+    for (const endpoint of jitoEndpoints) {
+      try {
+        console.log(`🔍 Debug - Building Jito bundle payload for ${endpoint}...`);
+        
+        const bundle = transactions.map(tx => {
+          // Force base58 encoding for Jito Engine
+          return bs58.default ? bs58.default.encode(tx.serialize()) : bs58.encode(tx.serialize());
+        });
 
-      // 🚀 SEND TO JITO
-      const response = await fetch('https://mainnet.block-engine.jito.wtf/api/v1/bundles', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          jsonrpc: "2.0",
-          id: 1,
-          method: "sendBundle",
-          params: [bundle]
-        }),
-      });
+        console.log(`🚀 Sending bundle to ${endpoint} (Attempt ${attempt}/${maxRetries})`);
+        
+        // 🚀 SEND TO JITO WITH ENHANCED HEADERS
+        const response = await fetch(endpoint, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'User-Agent': 'Cucumverse-Bot/1.0',
+          },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            method: "sendBundle",
+            params: [bundle]
+          }),
+          timeout: 15000, // 15 second timeout
+        });
 
-      const data = await response.json();
-      
-      if (data.error) throw new Error(data.error.message);
-      if (!data.result) throw new Error('No result returned from Jito bundle');
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
 
-      console.log('✅ Bundle sent successfully:', data.result);
-      return { success: true, signature: data.result };
-      
-    } catch (err) {
-      console.error(`❌ Bundle attempt ${attempt} failed:`, err.message);
-      if (attempt === maxRetries) return { success: false, error: err.message };
-      await new Promise(r => setTimeout(r, 2000));
+        const data = await response.json();
+        
+        if (data.error) {
+          console.error(`Jito API Error: ${JSON.stringify(data.error)}`);
+          throw new Error(data.error.message || 'Jito API error');
+        }
+        
+        if (!data.result) {
+          throw new Error('No result returned from Jito bundle');
+        }
+
+        const bundleId = data.result;
+        console.log('✅ Bundle sent successfully:', bundleId);
+        
+        // Wait for bundle confirmation
+        console.log('⏳ Waiting for bundle confirmation...');
+        await new Promise(resolve => setTimeout(resolve, 3000));
+        
+        return { success: true, signature: bundleId };
+        
+      } catch (err) {
+        console.error(`❌ Bundle attempt ${attempt} failed for ${endpoint}:`, err.message);
+        
+        // If this is not the last endpoint, try the next one
+        if (endpoint !== jitoEndpoints[jitoEndpoints.length - 1]) {
+          console.log('🔄 Trying next Jito endpoint...');
+          continue;
+        }
+        
+        // If this is the last endpoint and last attempt, return failure
+        if (attempt === maxRetries) {
+          return { success: false, error: err.message };
+        }
+        
+        // Wait before retrying
+        const delay = Math.min(2000 * attempt, 8000); // Exponential backoff, max 8s
+        console.log(`⏳ Waiting ${delay}ms before retry...`);
+        await new Promise(r => setTimeout(r, delay));
+      }
     }
   }
+  
+  return { success: false, error: 'All Jito endpoints failed after maximum retries' };
 }
 
 /**
