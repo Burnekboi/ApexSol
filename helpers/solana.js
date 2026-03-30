@@ -67,7 +67,7 @@ async function buildAndSendTx(connection, instructions, payer, signers, priority
           lastValidBlockHeight
         }, 'confirmed'),
         new Promise((_, reject) => 
-          setTimeout(() => reject(new Error('Transaction confirmation timeout')), 30000)
+          setTimeout(() => reject(new Error('Transaction confirmation timeout')), 45000) // Increased to 45s
         )
       ]);
       
@@ -628,10 +628,23 @@ async function handleDeployRequest(bot, connection, data, chatId, session, termM
         
         // Now try to buy the created token
         try {
+          console.log(`🛒 Attempting dev buy of ${initialBuy} SOL tokens...`);
+          
           const globalAccount = await sdk.getGlobalAccount('confirmed');
           const buyAmount = globalAccount.getInitialBuyPrice(devBuyLamports);
           const { calculateWithSlippageBuy } = require('pumpdotfun-sdk/dist/cjs/util');
           const buyAmountWithSlippage = calculateWithSlippageBuy(devBuyLamports, 500n);
+          
+          // Check if dev wallet has enough SOL for buy
+          const currentBalance = await connection.getBalance(mainKeypair.publicKey);
+          const totalCost = buyAmount + BigInt(5000000); // Buy amount + buffer for fees
+          
+          if (currentBalance < totalCost) {
+            const needed = Number(totalCost - currentBalance) / LAMPORTS_PER_SOL;
+            throw new Error(`❌ INSUFFICIENT SOL for dev buy: Need ${needed.toFixed(4)} more SOL. Current: ${(currentBalance / LAMPORTS_PER_SOL).toFixed(4)} SOL`);
+          }
+          
+          console.log(`✅ Dev buy balance check passed: ${(currentBalance / LAMPORTS_PER_SOL).toFixed(4)} SOL available`);
           
           // Use enhanced buy instruction with all required accounts
           const buyTx = await buildBuyInstruction(
@@ -642,6 +655,7 @@ async function handleDeployRequest(bot, connection, data, chatId, session, termM
             buyAmountWithSlippage
           );
 
+          console.log(`🚀 Sending dev buy transaction...`);
           const buySig = await buildAndSendTx(
             connection,
             buyTx.instructions,
@@ -650,13 +664,25 @@ async function handleDeployRequest(bot, connection, data, chatId, session, termM
             { unitLimit: 250000, unitPrice: 250000 }
           );
           
-          console.log(`✅ Buy completed: https://solscan.io/tx/${buySig}`);
+          console.log(`✅ Dev buy completed: https://solscan.io/tx/${buySig}`);
+          
+          // Verify the buy actually worked by checking bonding curve reserves changed
+          await new Promise(resolve => setTimeout(resolve, 2000));
+          const postBuyData = await getBondingCurveData(connection, mintKeypair.publicKey);
+          if (postBuyData && postBuyData.virtualSolReserves) {
+            console.log(`✅ Dev buy verified - New SOL reserves: ${postBuyData.virtualSolReserves}`);
+          }
+          
           deploymentSig = createSig; // Use create signature as primary
           
         } catch (buyError) {
-          console.error(`❌ Buy failed after token creation: ${buyError.message}`);
-          // Still return the create signature since token was created
-          deploymentSig = createSig;
+          console.error(`❌ Dev buy failed: ${buyError.message}`);
+          // Don't show fake success - be clear about the failure
+          session.liveLogs.push({
+            status: 'error',
+            message: `❌ Dev buy failed: ${buyError.message}. Token created but dev wallet couldn't buy.`
+          });
+          deploymentSig = createSig; // Still return create signature since token was created
         }
       }
 
@@ -687,8 +713,25 @@ async function handleDeployRequest(bot, connection, data, chatId, session, termM
     session.liveLogs.push({ status: 'success', message: `🚀 Token Deployed! TX: ${String(deploymentSig).slice(0, 16)}...` });
 
     if (devBuyLamports > 0n) {
-      session.liveLogs.push({ status: 'success', message: `💰 Dev Buy Complete! ${initialBuy} SOL → ~${estDevTokens} tokens` });
-      session.liveLogs.push({ status: 'success', message: `👑 Dev wallet is FIRST BUYER ✅ (same TX as create)` });
+      // Check if dev buy actually succeeded by verifying the buy transaction
+      let devBuySucceeded = false;
+      try {
+        const postBuyData = await getBondingCurveData(connection, mintKeypair.publicKey);
+        if (postBuyData && postBuyData.virtualSolReserves) {
+          devBuySucceeded = true;
+          session.liveLogs.push({ status: 'success', message: `💰 Dev Buy Complete! ${initialBuy} SOL → ~${estDevTokens} tokens` });
+          session.liveLogs.push({ status: 'success', message: `👑 Dev wallet is FIRST BUYER ✅ (same TX as create)` });
+        }
+      } catch (verifyErr) {
+        console.error('Could not verify dev buy:', verifyErr.message);
+      }
+      
+      if (!devBuySucceeded) {
+        session.liveLogs.push({ 
+          status: 'warning', 
+          message: `⚠️ Dev buy may have failed. Token created but dev wallet couldn't buy.` 
+        });
+      }
     }
 
     session.liveLogs.push({ status: 'completed', message: `✅ ${symbol} token successfully created` });
@@ -719,10 +762,23 @@ async function handleDeployRequest(bot, connection, data, chatId, session, termM
       await editTerminal(
         `🤖 *Swarm Engaged!*\n\n📍 Mint: \`${mintAddress}\`\n🚀 *${activeBuyers.length} bot wallets buying now...*`
       );
+      
+      // Add log to show bot wallets are attempting to buy
+      session.liveLogs.push({ 
+        status: 'processing', 
+        message: `🤖 ${activeBuyers.length} bot wallets attempting to buy ${symbol}...` 
+      });
+      
       const originalBuyers = session.buyers;
       session.buyers = activeBuyers;
       await performRealTrading(bot, connection, session, chatId);
       session.buyers = originalBuyers;
+      
+      // Add completion log for bot wallets
+      session.liveLogs.push({ 
+        status: 'success', 
+        message: `✅ Bot wallet swarm completed` 
+      });
     }
 
     // ---------------- SHOW TRADE PANEL ----------------
