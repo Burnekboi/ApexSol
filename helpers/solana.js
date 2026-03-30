@@ -112,10 +112,10 @@ async function executeAtomicCreateAndBuy(connection, sdk, mainKeypair, mintKeypa
     
     if (balance < estimatedCost) {
       const deficit = Number(estimatedCost - balance) / LAMPORTS_PER_SOL;
-      throw new Error(`❌ INSUFFICIENT SOL: Need ${initialBuySol} SOL for buy + ~0.02 SOL for fees, but only have ${(balance / LAMPORTS_PER_SOL).toFixed(4)} SOL. Missing ${deficit.toFixed(4)} SOL`);
+      throw new Error(`❌ INSUFFICIENT SOL: Need ${initialBuySol} SOL for buy + ~0.02 SOL for fees/tips, but only have ${(balance / LAMPORTS_PER_SOL).toFixed(4)} SOL. Missing ${deficit.toFixed(4)} SOL. Atomic create+buy requires at least 0.05 SOL total.`);
     }
     
-    console.log(`✅ SOL balance check passed: ${(balance / LAMPORTS_PER_SOL).toFixed(4)} SOL available`);
+    console.log(`✅ SOL balance check passed: ${(balance / LAMPORTS_PER_SOL).toFixed(4)} SOL available (minimum 0.05 SOL required for atomic)`);
 
     // 1. Get standard Create instructions
     console.log('🔧 Building Create instructions from SDK...');
@@ -373,8 +373,8 @@ async function sendJitoBundle({ transactions, maxRetries = 3 }) {
           return { success: false, error: err.message };
         }
         
-        // Wait before retrying
-        const delay = Math.min(2000 * attempt, 8000); // Exponential backoff, max 8s
+        // Wait before retrying (exponential backoff)
+        const delay = Math.min(2000 * Math.pow(2, attempt - 1), 10000); // Max 10s
         console.log(`⏳ Waiting ${delay}ms before retry...`);
         await new Promise(r => setTimeout(r, delay));
       }
@@ -588,10 +588,18 @@ async function handleDeployRequest(bot, connection, data, chatId, session, termM
           message: `⚠️ Jito bundle failed, using legacy create+buy method...`
         });
         
-        // First, create the token
+        // First, create the token using SDK's create instructions
+        const createInstructionsTx = await sdk.getCreateInstructions(
+          mainKeypair.publicKey,
+          tokenName,
+          symbol,
+          metadataUri,
+          mintKeypair
+        );
+        
         const createSig = await buildAndSendTx(
           connection,
-          Array.isArray(createTx) ? createTx : [createTx],
+          Array.isArray(createInstructionsTx) ? createInstructionsTx : [createInstructionsTx],
           mainKeypair.publicKey,
           [mainKeypair, mintKeypair],
           { unitLimit: 400000, unitPrice: 250000 }
