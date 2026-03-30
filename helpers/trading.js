@@ -293,6 +293,9 @@ async function stopAllTrading(session) {
     status: 'failed',
     message: "🛑 TRADING HALTED BY USER"
   });
+
+  // Show trade panel after stopping
+  session.showTradePanel = true;
 }
 
 // ---------------- SELL ALL ----------------
