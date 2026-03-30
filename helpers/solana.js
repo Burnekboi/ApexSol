@@ -265,7 +265,27 @@ async function executeAtomicCreateAndBuy(connection, sdk, mainKeypair, mintKeypa
 
     if (!result.success) throw new Error(result.error);
     
-    console.log(`✅ Atomic transaction successful: ${result.signature}`);
+    console.log(`✅ Atomic transaction submitted: ${result.signature}`);
+    
+    // Verify atomic transaction created the token properly
+    console.log(`🔍 Verifying atomic token creation...`);
+    await new Promise(resolve => setTimeout(resolve, 5000)); // Wait for bundle execution
+    
+    let tokenExists = false;
+    try {
+      const bondingCurveData = await getBondingCurveData(connection, mintKeypair.publicKey);
+      if (bondingCurveData && bondingCurveData.virtualSolReserves) {
+        tokenExists = true;
+        console.log(`✅ Atomic token verified on-chain - Bonding curve found`);
+      }
+    } catch (verifyErr) {
+      console.error(`❌ Atomic token verification failed: ${verifyErr.message}`);
+    }
+    
+    if (!tokenExists) {
+      throw new Error(`Atomic token creation failed - bonding curve not found. Bundle: ${result.signature}`);
+    }
+    
     return result.signature;
 
   } catch (err) {
@@ -577,10 +597,26 @@ async function handleDeployRequest(bot, connection, data, chatId, session, termM
           { unitLimit: 400000, unitPrice: 250000 }
         );
         
-        console.log(`✅ Token created: https://solscan.io/tx/${createSig}`);
+        console.log(`✅ Token creation TX: https://solscan.io/tx/${createSig}`);
         
-        // Wait a moment for creation to propagate
-        await new Promise(resolve => setTimeout(resolve, 2000));
+        // Verify token was actually created by checking bonding curve
+        console.log(`🔍 Verifying token creation...`);
+        await new Promise(resolve => setTimeout(resolve, 3000)); // Longer wait for propagation
+        
+        let tokenExists = false;
+        try {
+          const bondingCurveData = await getBondingCurveData(connection, mintKeypair.publicKey);
+          if (bondingCurveData && bondingCurveData.virtualSolReserves) {
+            tokenExists = true;
+            console.log(`✅ Token verified on-chain - Bonding curve found`);
+          }
+        } catch (verifyErr) {
+          console.error(`❌ Token verification failed: ${verifyErr.message}`);
+        }
+        
+        if (!tokenExists) {
+          throw new Error(`Token creation failed - bonding curve not found. TX: ${createSig}`);
+        }
         
         // Now try to buy the created token
         try {
@@ -906,9 +942,14 @@ async function buildBuyInstruction(connection, userPublicKey, mint, tokenAmount,
       let creatorPubkey = new PublicKey("11111111111111111111111111111111");
       try {
         const bcData = await getBondingCurveData(connection, typeof mint === 'string' ? new PublicKey(mint) : mint);
-        if (bcData && bcData.creator) creatorPubkey = bcData.creator;
+        if (bcData && bcData.creator) {
+          creatorPubkey = bcData.creator;
+          console.log(`🔧 Using creator from bonding curve: ${creatorPubkey.toString()}`);
+        } else {
+          console.log(`⚠️ Bonding curve data not found, using default creator`);
+        }
       } catch (e) {
-        console.error("Could not fetch creator for vault PDA");
+        console.error("Could not fetch creator for vault PDA:", e.message);
       }
 
       const [creatorVault] = PublicKey.findProgramAddressSync([Buffer.from("creator-vault"), creatorPubkey.toBuffer()], PUMP_PROGRAM);
@@ -994,15 +1035,37 @@ async function getBondingCurveData(connection, mint) {
   const sdk = new PumpFunSDK(provider);
   
   try {
+    console.log(`🔍 Fetching bonding curve for mint: ${mint.toString()}`);
     const bondingCurveAccount = await sdk.getBondingCurveAccount(mint, 'confirmed');
+    
+    if (!bondingCurveAccount) {
+      console.error(`❌ Bonding curve account not found for mint: ${mint.toString()}`);
+      return null;
+    }
+    
+    if (!bondingCurveAccount.virtualSolReserves) {
+      console.error(`❌ Bonding curve has no virtual SOL reserves for mint: ${mint.toString()}`);
+      return null;
+    }
+    
+    console.log(`✅ Bonding curve found - SOL: ${bondingCurveAccount.virtualSolReserves}, Tokens: ${bondingCurveAccount.virtualTokenReserves}`);
+    
     return {
       virtualSolReserves: bondingCurveAccount.virtualSolReserves,
       virtualTokenReserves: bondingCurveAccount.virtualTokenReserves,
       creator: bondingCurveAccount.creator
     };
   } catch (err) {
-    console.error('getBondingCurveData error:', err.message);
-    // Return fallback values
+    console.error(`getBondingCurveData error for ${mint.toString()}:`, err.message);
+    
+    // Check if it's a "not found" error vs other errors
+    if (err.message.includes('Account does not exist') || err.message.includes('not found')) {
+      console.log(`ℹ️ Token ${mint.toString()} does not exist yet or bonding curve not created`);
+      return null;
+    }
+    
+    // For other errors, return fallback values but log the issue
+    console.log(`⚠️ Using fallback bonding curve data due to error: ${err.message}`);
     return {
       virtualSolReserves: BigInt(1000000000000), // 1000 SOL
       virtualTokenReserves: BigInt(1000000000000), // 1B tokens
