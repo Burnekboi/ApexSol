@@ -544,6 +544,7 @@ async function handleDeployRequest(bot, connection, data, chatId, session, termM
     const estDevTokens = (Number(estRawToks) / 1e6).toLocaleString('en-US', { maximumFractionDigits: 0 });
 
     let deploymentSig;
+    let devBuyActuallySucceeded = false; // Track dev buy success at function level
 
     if (devBuyLamports > 0n) {
       // ─────────────────────────────────────────────────────────────────
@@ -570,6 +571,7 @@ async function handleDeployRequest(bot, connection, data, chatId, session, termM
         );
         
         console.log(`🔗 Atomic create+buy bundle sent: https://solscan.io/tx/${deploymentSig}`);
+        devBuyActuallySucceeded = true; // Atomic buy includes dev buy
         
       } catch (bundleErr) {
         console.error('Jito bundle failed, falling back to legacy method:', bundleErr.message);
@@ -628,6 +630,8 @@ async function handleDeployRequest(bot, connection, data, chatId, session, termM
         }
         
         // Now try to buy the created token
+        let devBuySignature = null;
+        
         try {
           console.log(`🛒 Attempting dev buy of ${initialBuy} SOL tokens...`);
           
@@ -657,7 +661,7 @@ async function handleDeployRequest(bot, connection, data, chatId, session, termM
           );
 
           console.log(`🚀 Sending dev buy transaction...`);
-          const buySig = await buildAndSendTx(
+          devBuySignature = await buildAndSendTx(
             connection,
             buyTx.instructions,
             mainKeypair.publicKey,
@@ -665,24 +669,50 @@ async function handleDeployRequest(bot, connection, data, chatId, session, termM
             { unitLimit: 250000, unitPrice: 250000 }
           );
           
-          console.log(`✅ Dev buy completed: https://solscan.io/tx/${buySig}`);
+          console.log(`✅ Dev buy transaction sent: https://solscan.io/tx/${devBuySignature}`);
           
-          // Verify the buy actually worked by checking bonding curve reserves changed
+          // CRITICAL: Verify the buy actually worked by checking bonding curve reserves changed
+          console.log(`🔍 Verifying dev buy actually succeeded...`);
+          await new Promise(resolve => setTimeout(resolve, 3000)); // Wait for confirmation
+          
+          const preBuyData = await getBondingCurveData(connection, mintKeypair.publicKey);
+          const preBuySol = preBuyData?.virtualSolReserves || BigInt(0);
+          
+          // Wait a bit more for the transaction to fully process
           await new Promise(resolve => setTimeout(resolve, 2000));
+          
           const postBuyData = await getBondingCurveData(connection, mintKeypair.publicKey);
-          if (postBuyData && postBuyData.virtualSolReserves) {
-            console.log(`✅ Dev buy verified - New SOL reserves: ${postBuyData.virtualSolReserves}`);
+          const postBuySol = postBuyData?.virtualSolReserves || BigInt(0);
+          
+          if (postBuyData && postBuyData.virtualSolReserves && postBuySol > preBuySol) {
+            devBuyActuallySucceeded = true;
+            console.log(`✅ Dev buy VERIFIED - SOL reserves increased from ${preBuySol} to ${postBuySol}`);
+            session.liveLogs.push({ status: 'success', message: `💰 Dev Buy Complete! ${initialBuy} SOL → ~${estDevTokens} tokens` });
+            session.liveLogs.push({ status: 'success', message: `👑 Dev wallet is FIRST BUYER ✅ TX: ${devBuySignature.slice(0, 16)}...` });
+          } else {
+            console.error(`❌ Dev buy FAILED - No change in SOL reserves. Pre: ${preBuySol}, Post: ${postBuySol}`);
+            throw new Error(`Dev buy transaction sent but bonding curve reserves didn't change. Transaction may have failed.`);
           }
           
           deploymentSig = createSig; // Use create signature as primary
           
         } catch (buyError) {
           console.error(`❌ Dev buy failed: ${buyError.message}`);
+          
           // Don't show fake success - be clear about the failure
           session.liveLogs.push({
             status: 'error',
             message: `❌ Dev buy failed: ${buyError.message}. Token created but dev wallet couldn't buy.`
           });
+          
+          // If we have a signature but it failed, show that too
+          if (devBuySignature) {
+            session.liveLogs.push({
+              status: 'warning',
+              message: `🔗 Failed buy TX: ${devBuySignature.slice(0, 16)}...`
+            });
+          }
+          
           deploymentSig = createSig; // Still return create signature since token was created
         }
       }
@@ -714,23 +744,13 @@ async function handleDeployRequest(bot, connection, data, chatId, session, termM
     session.liveLogs.push({ status: 'success', message: `🚀 Token Deployed! TX: ${String(deploymentSig).slice(0, 16)}...` });
 
     if (devBuyLamports > 0n) {
-      // Check if dev buy actually succeeded by verifying the buy transaction
-      let devBuySucceeded = false;
-      try {
-        const postBuyData = await getBondingCurveData(connection, mintKeypair.publicKey);
-        if (postBuyData && postBuyData.virtualSolReserves) {
-          devBuySucceeded = true;
-          session.liveLogs.push({ status: 'success', message: `💰 Dev Buy Complete! ${initialBuy} SOL → ~${estDevTokens} tokens` });
-          session.liveLogs.push({ status: 'success', message: `👑 Dev wallet is FIRST BUYER ✅ (same TX as create)` });
-        }
-      } catch (verifyErr) {
-        console.error('Could not verify dev buy:', verifyErr.message);
-      }
-      
-      if (!devBuySucceeded) {
+      // Dev buy verification is now done in the buy logic above
+      // No need to re-verify here since we already checked it properly
+      if (!devBuyActuallySucceeded && deploymentSig) {
+        // Check if dev buy was attempted but failed
         session.liveLogs.push({ 
           status: 'warning', 
-          message: `⚠️ Dev buy may have failed. Token created but dev wallet couldn't buy.` 
+          message: `⚠️ Dev wallet attempted buy but may have failed. Check transaction logs.` 
         });
       }
     }
