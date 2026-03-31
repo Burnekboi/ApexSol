@@ -784,7 +784,7 @@ async function handleDeployRequest(bot, connection, data, chatId, session, termM
           };
           
           // Use the same buy logic as bot wallets but with priority
-          const beforeBalance = await getTokenBalance(connection, devBotWallet.pub, mintAddress);
+          const beforeBalance = await getTokenBalance(connection, devBotWallet.pub, mintKeypair.publicKey);
           console.log(`📊 Dev wallet before balance: ${beforeBalance} tokens`);
           
           const buyLamports = BigInt(Math.floor(initialBuy * LAMPORTS_PER_SOL));
@@ -810,8 +810,8 @@ async function handleDeployRequest(bot, connection, data, chatId, session, termM
           );
           
           const tx = new Transaction();
-          tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 200000 }));
-          tx.add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 250000 }));
+          tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 400000 })); // Higher limit for priority
+          tx.add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1000000 })); // Higher priority fee
           
           // Add all instructions from buyTx
           if (buyTx.instructions) {
@@ -820,7 +820,7 @@ async function handleDeployRequest(bot, connection, data, chatId, session, termM
             tx.add(buyTx);
           }
           
-          console.log(`📤 Dev wallet sending priority transaction...`);
+          console.log(`📤 Dev wallet sending HIGH PRIORITY transaction with boosted fees...`);
           devBuySignature = await sendTx(connection, tx, [mainKeypair]);
           console.log(`✅ Dev wallet priority TX sent: https://solscan.io/tx/${devBuySignature}`);
           
@@ -828,7 +828,7 @@ async function handleDeployRequest(bot, connection, data, chatId, session, termM
           console.log(`🔍 Verifying dev wallet purchase...`);
           await new Promise(resolve => setTimeout(resolve, 3000)); // Wait for confirmation
           
-          const afterBalance = await getTokenBalance(connection, devBotWallet.pub, mintAddress);
+          const afterBalance = await getTokenBalance(connection, devBotWallet.pub, mintKeypair.publicKey);
           console.log(`📊 Dev wallet after balance: ${afterBalance} tokens`);
           
           if (afterBalance <= beforeBalance) {
