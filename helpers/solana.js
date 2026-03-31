@@ -109,14 +109,14 @@ async function executeAtomicCreateAndBuy(connection, sdk, mainKeypair, mintKeypa
 
     // 0. Check SOL balance first
     const balance = await connection.getBalance(mainKeypair.publicKey);
-    const estimatedCost = devBuyLamports + BigInt(20000000); // Buy amount + ~0.02 SOL for fees/tips
+    const estimatedCost = devBuyLamports + BigInt(50000000); // Buy amount + 0.05 SOL for fees/tips (increased from 0.02)
     
     if (balance < estimatedCost) {
       const deficit = Number(estimatedCost - balance) / LAMPORTS_PER_SOL;
-      throw new Error(`❌ INSUFFICIENT SOL: Need ${initialBuySol} SOL for buy + ~0.02 SOL for fees/tips, but only have ${(balance / LAMPORTS_PER_SOL).toFixed(4)} SOL. Missing ${deficit.toFixed(4)} SOL. Atomic create+buy requires at least 0.05 SOL total.`);
+      throw new Error(`❌ INSUFFICIENT SOL: Need ${initialBuySol} SOL for buy + ~0.05 SOL for fees/tips, but only have ${(balance / LAMPORTS_PER_SOL).toFixed(4)} SOL. Missing ${deficit.toFixed(4)} SOL. Atomic create+buy requires at least ${(Number(devBuyLamports) / LAMPORTS_PER_SOL + 0.05).toFixed(2)} SOL total.`);
     }
     
-    console.log(`✅ SOL balance check passed: ${(balance / LAMPORTS_PER_SOL).toFixed(4)} SOL available (minimum 0.05 SOL required for atomic)`);
+    console.log(`✅ SOL balance check passed: ${(balance / LAMPORTS_PER_SOL).toFixed(4)} SOL available (minimum ${(Number(devBuyLamports) / LAMPORTS_PER_SOL + 0.05).toFixed(2)} SOL required for atomic)`);
 
     // 1. Get standard Create instructions
     console.log('🔧 Building Create instructions from SDK...');
@@ -246,13 +246,17 @@ async function executeAtomicCreateAndBuy(connection, sdk, mainKeypair, mintKeypa
     const serializedTx = transaction.serialize();
     const txSize = serializedTx.length;
     console.log(`📏 Transaction size: ${txSize} bytes (limit: 1232 bytes)`);
+    console.log(`📋 Instruction count: ${allInstructions.length} instructions`);
     
     if (txSize > 1232) {
-      console.warn(`⚠️ Transaction too large! ${txSize} > 1232 bytes. This may cause Jito 400 errors.`);
-      console.log(`📋 Instruction breakdown:`);
+      console.warn(`⚠️ TRANSACTION TOO LARGE! ${txSize} > 1232 bytes. This will cause Jito 400 errors.`);
+      console.log(`📋 Instruction breakdown by size:`);
       allInstructions.forEach((ix, i) => {
-        console.log(`  ${i+1}. ${ix.programId.toString()} (${ix.data.length} bytes data)`);
+        const ixSize = ix.data.length + 32; // Approximate instruction size
+        console.log(`  ${i+1}. ${ix.programId.toString()} (~${ixSize} bytes)`);
       });
+      console.log(`💡 TIP: Try reducing initial buy amount or simplifying transaction`);
+      throw new Error(`Transaction too large: ${txSize} bytes > 1232 limit. Reduce buy amount or simplify transaction.`);
     }
 
     // 6. Sign with both the Payer and the Mint Keypair
@@ -467,14 +471,20 @@ async function sendJitoBundle({ transactions, maxRetries = 3 }) {
           timeout: 15000, // 15 second timeout
         });
 
+        console.log(`📊 Response status: ${response.status} ${response.statusText}`);
+        console.log(`📊 Response headers:`, Object.fromEntries(response.headers.entries()));
+
         if (!response.ok) {
-          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+          const errorText = await response.text();
+          console.error(`❌ Jito API Error Response: ${errorText}`);
+          throw new Error(`HTTP ${response.status}: ${response.statusText} - ${errorText}`);
         }
 
         const data = await response.json();
+        console.log(`📊 Jito API Response:`, JSON.stringify(data, null, 2));
         
         if (data.error) {
-          console.error(`Jito API Error: ${JSON.stringify(data.error)}`);
+          console.error(`❌ Jito API Error: ${JSON.stringify(data.error)}`);
           throw new Error(data.error.message || 'Jito API error');
         }
         
