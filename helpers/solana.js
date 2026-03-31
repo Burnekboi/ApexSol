@@ -98,203 +98,130 @@ async function buildAndSendTx(connection, instructions, payer, signers, priority
 }
 
 /**
- * ===============================
- * 🛒 ATOMIC CREATE + BUY WITH JITO (FIXED)
- * ===============================
+ * 🚀 FAST ATOMIC DEV BUY (NO JITO - MANUAL PRIORITY)
+ * ==================================================
+ * Buys existing token using stored CA from session.tradeConfig.contractAddress
  */
-async function executeAtomicCreateAndBuy(connection, sdk, mainKeypair, mintKeypair, tokenName, symbol, metadataUri, initialBuySol) {
+async function executeAtomicCreateAndBuy(connection, sdk, mainKeypair, mintKeypair, tokenName, symbol, metadataUri, initialBuySol, session) {
   try {
     const PUMP_PROGRAM = new PublicKey('6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P');
     const devBuyLamports = BigInt(Math.floor(initialBuySol * LAMPORTS_PER_SOL));
 
+    // Get token CA from session (already created and stored)
+    const tokenMintAddress = session.tradeConfig?.contractAddress;
+    if (!tokenMintAddress) {
+      throw new Error('❌ No token contract address found in session. Token must be created first.');
+    }
+
+    console.log(`🎯 FAST ATOMIC DEV BUY - Using existing token: ${tokenMintAddress}`);
+    console.log(`💰 Buying ${initialBuySol} SOL worth of tokens with MAXIMUM PRIORITY`);
+
     // 0. Check SOL balance first
     const balance = await connection.getBalance(mainKeypair.publicKey);
-    const estimatedCost = devBuyLamports + BigInt(50000000); // Buy amount + 0.05 SOL for fees/tips (increased from 0.02)
+    const estimatedCost = devBuyLamports + BigInt(20000000); // Buy amount + 0.02 SOL for fees
     
     if (balance < estimatedCost) {
       const deficit = Number(estimatedCost - balance) / LAMPORTS_PER_SOL;
-      throw new Error(`❌ INSUFFICIENT SOL: Need ${initialBuySol} SOL for buy + ~0.05 SOL for fees/tips, but only have ${(balance / LAMPORTS_PER_SOL).toFixed(4)} SOL. Missing ${deficit.toFixed(4)} SOL. Atomic create+buy requires at least ${(Number(devBuyLamports) / LAMPORTS_PER_SOL + 0.05).toFixed(2)} SOL total.`);
+      throw new Error(`❌ INSUFFICIENT SOL: Need ${initialBuySol} SOL for buy + ~0.02 SOL for fees, but only have ${(balance / LAMPORTS_PER_SOL).toFixed(4)} SOL. Missing ${deficit.toFixed(4)} SOL.`);
     }
     
-    console.log(`✅ SOL balance check passed: ${(balance / LAMPORTS_PER_SOL).toFixed(4)} SOL available (minimum ${(Number(devBuyLamports) / LAMPORTS_PER_SOL + 0.05).toFixed(2)} SOL required for atomic)`);
+    console.log(`✅ SOL balance check passed: ${(balance / LAMPORTS_PER_SOL).toFixed(4)} SOL available`);
 
-    // 1. Get standard Create instructions
-    console.log('🔧 Building Create instructions from SDK...');
+    // 1. Create dev wallet structure
+    const devBotWallet = {
+      pub: mainKeypair.publicKey,
+      priv: session.mainWallet.priv,
+      trade: null
+    };
     
-    if (!mintKeypair || !mintKeypair.publicKey) {
-      throw new Error('mintKeypair is not properly initialized');
+    // 2. Get token balance before buy
+    const beforeBalance = await getTokenBalance(connection, devBotWallet.pub, tokenMintAddress);
+    console.log(`📊 Dev wallet before balance: ${beforeBalance} tokens`);
+    
+    // 3. Get bonding curve for accurate token calculation
+    const bondingCurveData = await getBondingCurveData(connection, new PublicKey(tokenMintAddress));
+    if (!bondingCurveData || !bondingCurveData.virtualSolReserves) {
+      throw new Error('Could not fetch bonding curve data for dev buy. Token may not be a valid pump.fun token.');
     }
     
-    console.log('🔑 Mint Keypair:', mintKeypair.publicKey.toString());
+    const { virtualSolReserves, virtualTokenReserves } = bondingCurveData;
+    const tokenAmt = calcBuyTokens(devBuyLamports, virtualSolReserves, virtualTokenReserves);
+    const maxSolCost = devBuyLamports * 105n / 100n; // 5% slippage (tight for priority)
     
-    const createTx = await sdk.getCreateInstructions(
-      mainKeypair.publicKey,
-      tokenName,
-      symbol,
-      "https://ipfs.io/ipfs/" + metadataUri.split("/").pop(),
-      mintKeypair
-    );
-    const createInstructions = createTx.instructions;
+    console.log(`🎯 Dev wallet buying ${tokenAmt} tokens for ${initialBuySol} SOL (IMMEDIATE PRIORITY)`);
     
-    // Compute budget instructions
-    createInstructions.unshift(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1500000 }));
-    createInstructions.unshift(ComputeBudgetProgram.setComputeUnitLimit({ units: 800000 }));
-    
-    console.log(`✅ Extracted ${createInstructions.length} create instructions from SDK`);
-
-    // 2. Prepare Buy Instruction using SDK (like buildBuyInstruction)
-    const globalAccount = await sdk.getGlobalAccount('confirmed');
-    const buyAmount = globalAccount.getInitialBuyPrice(devBuyLamports);
-    const { calculateWithSlippageBuy } = require('pumpdotfun-sdk/dist/cjs/util');
-    const buyAmountWithSlippage = calculateWithSlippageBuy(devBuyLamports, 500n); // 5% slippage
-    
-    // Use SDK's getBuyInstructions then patch it
-    const buyTx = await sdk.getBuyInstructions(
-      mainKeypair.publicKey,
-      mintKeypair.publicKey,
-      globalAccount.feeRecipient,
-      buyAmount,
-      buyAmountWithSlippage
+    // 4. Build buy instruction for existing token
+    const buyTx = await buildBuyInstruction(
+      connection,
+      devBotWallet.pub,
+      new PublicKey(tokenMintAddress),
+      tokenAmt,
+      maxSolCost
     );
     
-    // Patch the buy instruction like we do in buildBuyInstruction
-    if (buyTx && buyTx.instructions) {
-      // Use main wallet as creator for atomic operations
-      const creatorPubkey = mainKeypair.publicKey;
-      const [creatorVault] = PublicKey.findProgramAddressSync([Buffer.from("creator-vault"), creatorPubkey.toBuffer()], PUMP_PROGRAM);
-      const [globalVolumeAccumulator] = PublicKey.findProgramAddressSync([Buffer.from("global_volume_accumulator")], PUMP_PROGRAM);
-      const [userVolumeAccumulator] = PublicKey.findProgramAddressSync([Buffer.from("user_volume_accumulator"), mainKeypair.publicKey.toBuffer()], PUMP_PROGRAM);
-      
-      // Use SDK's global account to get proper fee config
-      try {
-        const globalAccountData = await sdk.getGlobalAccount('confirmed');
-        console.log(`🔧 Using SDK global account for fee configuration`);
-      } catch (e) {
-        console.log(`⚠️ Could not get global account, using derived fee_config`);
-      }
-      
-      const [feeConfig] = PublicKey.findProgramAddressSync([Buffer.from("fee_config")], PUMP_PROGRAM);
-      const feeProgram = new PublicKey("pfeeUxB6jkeY1Hxd7CsFCAjcbHA9rWtchMGdZ6VojVZ");
-      const [bondingCurveV2] = PublicKey.findProgramAddressSync([Buffer.from('bonding-curve-v2'), mintKeypair.publicKey.toBuffer()], PUMP_PROGRAM);
-
-      console.log(`🔧 Creator Vault: ${creatorVault.toString()}`);
-      console.log(`🔧 Global Volume Accumulator: ${globalVolumeAccumulator.toString()}`);
-      console.log(`🔧 User Volume Accumulator: ${userVolumeAccumulator.toString()}`);
-      console.log(`🔧 Fee Config: ${feeConfig.toString()}`);
-      console.log(`🔧 Fee Program: ${feeProgram.toString()}`);
-      console.log(`🔧 Bonding Curve V2: ${bondingCurveV2.toString()}`);
-
-      buyTx.instructions.forEach(ix => {
-        if (ix.programId.equals(PUMP_PROGRAM)) {
-          const oldKeys = [...ix.keys];
-          
-          ix.keys = [];
-          // Keep first 9 standard accounts
-          for (let i = 0; i <= 8; i++) {
-            if (oldKeys[i]) ix.keys.push(oldKeys[i]);
-          }
-          
-          // 9: creator_vault (replaces rent)
-          ix.keys.push({ pubkey: creatorVault, isSigner: false, isWritable: true });
-          
-          // 10 & 11: eventAuthority & program
-          if (oldKeys[10]) ix.keys.push(oldKeys[10]);
-          else ix.keys.push({ pubkey: new PublicKey("Ce6TQqeHC9p8KetsN6JsjHK7UTZk7nasjjnr7XxXp9F1"), isSigner: false, isWritable: false });
-          
-          if (oldKeys[11]) ix.keys.push(oldKeys[11]);
-          else ix.keys.push({ pubkey: PUMP_PROGRAM, isSigner: false, isWritable: false });
-          
-          // Append the 4 new mandatory accounts! (fee_config as writable to allow initialization)
-          ix.keys.push({ pubkey: globalVolumeAccumulator, isSigner: false, isWritable: true });
-          ix.keys.push({ pubkey: userVolumeAccumulator, isSigner: false, isWritable: true });
-          ix.keys.push({ pubkey: feeConfig, isSigner: false, isWritable: true }); // Make writable for initialization
-          ix.keys.push({ pubkey: feeProgram, isSigner: false, isWritable: false });
-          ix.keys.push({ pubkey: bondingCurveV2, isSigner: false, isWritable: true });
-        }
-      });
+    // 5. Create MAXIMUM PRIORITY buy transaction
+    const priorityBuyTx = new Transaction();
+    priorityBuyTx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 400000 }));
+    priorityBuyTx.add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 2000000 })); // MAX PRIORITY
+    
+    // Add buy instructions
+    if (buyTx.instructions) {
+      buyTx.instructions.forEach(ix => priorityBuyTx.add(ix));
+    } else {
+      priorityBuyTx.add(buyTx);
     }
     
-    const buyIx = buyTx.instructions.find(ix => ix.programId.equals(PUMP_PROGRAM));
-
-    // 3. Jito Tip (Using correct NY tip account as first instruction for priority)
-    const jitoTipIx = SystemProgram.transfer({
-      fromPubkey: mainKeypair.publicKey,
-      toPubkey: new PublicKey("DttWaMuVvTiduZRnguLF7jNxTgiMBZ1hyAumKUiL2KRL"), // NY Jito Tip Account
-      lamports: 1000000, // 0.001 SOL minimum tip
+    // 6. Get fresh blockhash and send immediately
+    const freshBlockhash = await connection.getLatestBlockhash("confirmed");
+    priorityBuyTx.recentBlockhash = freshBlockhash.blockhash;
+    priorityBuyTx.feePayer = mainKeypair.publicKey;
+    priorityBuyTx.sign([mainKeypair]);
+    
+    console.log(`🚀 SENDING IMMEDIATE PRIORITY BUY...`);
+    const devBuySignature = await sendTx(connection, priorityBuyTx, [mainKeypair]);
+    console.log(`✅ IMMEDIATE DEV BUY SENT: https://solscan.io/tx/${devBuySignature}`);
+    
+    // 7. Verify dev buy success
+    console.log(`🔍 Verifying immediate dev buy...`);
+    await new Promise(resolve => setTimeout(resolve, 2000)); // Quick verification
+    
+    const afterBalance = await getTokenBalance(connection, devBotWallet.pub, new PublicKey(tokenMintAddress));
+    console.log(`📊 Dev wallet after balance: ${afterBalance} tokens`);
+    
+    if (afterBalance <= beforeBalance) {
+      throw new Error(`No tokens received. Before: ${beforeBalance}, After: ${afterBalance}`);
+    }
+    
+    // SUCCESS - Dev wallet bought with maximum priority
+    const tokenReceived = afterBalance - beforeBalance;
+    
+    console.log(`🎉 IMMEDIATE DEV BUY SUCCESS: ${tokenReceived} tokens for ${initialBuySol} SOL`);
+    
+    // Set dev wallet trade info
+    devBotWallet.trade = {
+      entryPricePerToken: initialBuy / tokenReceived,
+      entrySol: initialBuy
+    };
+    
+    // Add success logs
+    session.liveLogs.push({
+      status: 'success',
+      message: `🎉 Dev wallet priority buy: ${initialBuy} SOL → ${tokenReceived.toFixed(2)} tokens`
     });
-
-    // 4. Combine all instructions into a single Atomic Set (tip first for priority)
-    const allInstructions = [
-      jitoTipIx, // Jito tip first for better priority
-      ...createInstructions, 
-      ...buyTx.instructions,
-    ];
-
-    console.log(`🚀 Creating Atomic VersionedTransaction with ${allInstructions.length} instructions...`);
     
-    // 5. Compile into a Versioned Transaction
-    const { blockhash } = await connection.getLatestBlockhash("finalized");
-    const messageV0 = new TransactionMessage({
-        payerKey: mainKeypair.publicKey,
-        recentBlockhash: blockhash,
-        instructions: allInstructions,
-    }).compileToV0Message();
-    
-    const transaction = new VersionedTransaction(messageV0);
-    
-    // Check transaction size
-    const serializedTx = transaction.serialize();
-    const txSize = serializedTx.length;
-    console.log(`📏 Transaction size: ${txSize} bytes (limit: 1232 bytes)`);
-    console.log(`📋 Instruction count: ${allInstructions.length} instructions`);
-    
-    if (txSize > 1232) {
-      console.warn(`⚠️ TRANSACTION TOO LARGE! ${txSize} > 1232 bytes. This will cause Jito 400 errors.`);
-      console.log(`📋 Instruction breakdown by size:`);
-      allInstructions.forEach((ix, i) => {
-        const ixSize = ix.data.length + 32; // Approximate instruction size
-        console.log(`  ${i+1}. ${ix.programId.toString()} (~${ixSize} bytes)`);
-      });
-      console.log(`💡 TIP: Try reducing initial buy amount or simplifying transaction`);
-      throw new Error(`Transaction too large: ${txSize} bytes > 1232 limit. Reduce buy amount or simplify transaction.`);
-    }
-
-    // 6. Sign with both the Payer and the Mint Keypair
-    transaction.sign([mainKeypair, mintKeypair]);
-    
-    // 7. Execute via your Jito function
-    const result = await sendJitoBundle({
-      transactions: [transaction],
-      maxRetries: 3
+    session.liveLogs.push({ 
+      status: 'success', 
+      message: `💰 Dev Buy Complete! ${initialBuy} SOL → ${tokenReceived.toFixed(2)} tokens` 
     });
-
-    if (!result.success) throw new Error(result.error);
+    session.liveLogs.push({ 
+      status: 'success', 
+      message: `👑 Dev wallet is FIRST BUYER ✅ TX: ${devBuySignature.slice(0, 16)}...` 
+    });
     
-    console.log(`✅ Atomic transaction submitted: ${result.signature}`);
-    
-    // Verify atomic transaction created the token properly
-    console.log(`🔍 Verifying atomic token creation...`);
-    await new Promise(resolve => setTimeout(resolve, 5000)); // Wait for bundle execution
-    
-    let tokenExists = false;
-    try {
-      const bondingCurveData = await getBondingCurveData(connection, mintKeypair.publicKey);
-      if (bondingCurveData && bondingCurveData.virtualSolReserves) {
-        tokenExists = true;
-        console.log(`✅ Atomic token verified on-chain - Bonding curve found`);
-      }
-    } catch (verifyErr) {
-      console.error(`❌ Atomic token verification failed: ${verifyErr.message}`);
-    }
-    
-    if (!tokenExists) {
-      throw new Error(`Atomic token creation failed - bonding curve not found. Bundle: ${result.signature}`);
-    }
-    
-    return result.signature;
+    return devBuySignature; // Return dev buy signature
 
   } catch (err) {
-    console.error("Atomic Error Detail:", err);
+    console.error("Atomic Dev Buy Error:", err);
     throw new Error(handleTransactionError(err));
   }
 }
@@ -689,14 +616,14 @@ async function handleDeployRequest(bot, connection, data, chatId, session, termM
 
     if (devBuyLamports > 0n) {
       // ─────────────────────────────────────────────────────────────────
-      // ATOMIC CREATE + DEV BUY WITH JITO BUNDLE
-      // Uses Jito bundle for true atomic execution in same block
+      // FAST ATOMIC CREATE + DEV BUY (NO JITO - MANUAL PRIORITY)
+      // Creates token then immediate priority buy for dev wallet
       // ─────────────────────────────────────────────────────────────────
-      console.log(`🚀 Atomic create+buy (${initialBuy} SOL) — using Jito bundle`);
+      console.log(`🚀 Fast atomic create+buy (${initialBuy} SOL) — manual priority execution`);
 
       session.liveLogs.push({
         status: 'processing',
-        message: `🏗 Creating ${symbol} with atomic dev buy (${initialBuy} SOL ≈ ${estDevTokens} tokens) via Jito bundle...`
+        message: `🏗 Creating ${symbol} with atomic dev buy (${initialBuy} SOL ≈ ${estDevTokens} tokens) via fast priority...`
       });
 
       try {
@@ -708,177 +635,16 @@ async function handleDeployRequest(bot, connection, data, chatId, session, termM
           tokenName,
           symbol,
           metadataUri,
-          initialBuy
+          initialBuy,
+          session
         );
         
-        console.log(`🔗 Atomic create+buy bundle sent: https://solscan.io/tx/${deploymentSig}`);
-        devBuyActuallySucceeded = true; // Atomic buy includes dev buy
+        console.log(`🔗 Fast atomic create+buy completed: https://solscan.io/tx/${deploymentSig}`);
+        devBuyActuallySucceeded = true; // Dev buy included in atomic
         
-      } catch (bundleErr) {
-        console.error('Jito bundle failed, falling back to legacy method:', bundleErr.message);
-        
-        // Check if it's a rate limit error - if so, wait a bit before fallback
-        if (bundleErr.response?.status === 429 || bundleErr.message?.includes('rate limit')) {
-          session.liveLogs.push({
-            status: 'processing',
-            message: `⚠️ Jito rate limited. Waiting 10s before fallback...`
-          });
-          await new Promise(resolve => setTimeout(resolve, 10000));
-        }
-        
-        // Fallback to legacy method if Jito fails
-        session.liveLogs.push({
-          status: 'processing',
-          message: `⚠️ Jito bundle failed, using legacy create+buy method...`
-        });
-        
-        // First, create the token using SDK's create instructions
-        const createInstructionsTx = await sdk.getCreateInstructions(
-          mainKeypair.publicKey,
-          tokenName,
-          symbol,
-          metadataUri,
-          mintKeypair
-        );
-        
-        const createSig = await buildAndSendTx(
-          connection,
-          Array.isArray(createInstructionsTx) ? createInstructionsTx : [createInstructionsTx],
-          mainKeypair.publicKey,
-          [mainKeypair, mintKeypair],
-          { unitLimit: 400000, unitPrice: 250000 }
-        );
-        
-        console.log(`✅ Token creation TX: https://solscan.io/tx/${createSig}`);
-        
-        // Verify token was actually created by checking bonding curve
-        console.log(`🔍 Verifying token creation...`);
-        await new Promise(resolve => setTimeout(resolve, 3000)); // Longer wait for propagation
-        
-        let tokenExists = false;
-        try {
-          const bondingCurveData = await getBondingCurveData(connection, mintKeypair.publicKey);
-          if (bondingCurveData && bondingCurveData.virtualSolReserves) {
-            tokenExists = true;
-            console.log(`✅ Token verified on-chain - Bonding curve found`);
-          }
-        } catch (verifyErr) {
-          console.error(`❌ Token verification failed: ${verifyErr.message}`);
-        }
-        
-        if (!tokenExists) {
-          throw new Error(`Token creation failed - bonding curve not found. TX: ${createSig}`);
-        }
-        
-        // Now use bot wallet functions for dev buy (priority execution)
-        let devBuySignature = null;
-        
-        try {
-          console.log(`🛒 Attempting priority dev buy of ${initialBuy} SOL tokens using bot wallet functions...`);
-          
-          // Create a temporary bot wallet structure for dev wallet
-          const devBotWallet = {
-            pub: mainKeypair.publicKey,
-            priv: session.mainWallet.priv,
-            trade: null
-          };
-          
-          // Use the same buy logic as bot wallets but with priority
-          const beforeBalance = await getTokenBalance(connection, devBotWallet.pub, mintKeypair.publicKey);
-          console.log(`📊 Dev wallet before balance: ${beforeBalance} tokens`);
-          
-          const buyLamports = BigInt(Math.floor(initialBuy * LAMPORTS_PER_SOL));
-          
-          // Get current bonding curve state for accurate token amount
-          const bondingCurveData = await getBondingCurveData(connection, mintKeypair.publicKey);
-          if (!bondingCurveData || !bondingCurveData.virtualSolReserves) {
-            throw new Error('Could not fetch bonding curve data for dev buy');
-          }
-          
-          const { virtualSolReserves, virtualTokenReserves } = bondingCurveData;
-          const tokenAmt = calcBuyTokens(buyLamports, virtualSolReserves, virtualTokenReserves);
-          const maxSolCost = buyLamports * 110n / 100n; // 10% slippage
-          
-          console.log(`🎯 Dev wallet buying ${tokenAmt} tokens for ${initialBuy} SOL (priority)`);
-          
-          const buyTx = await buildBuyInstruction(
-            connection,
-            devBotWallet.pub,
-            mintKeypair.publicKey,
-            tokenAmt,
-            maxSolCost
-          );
-          
-          const tx = new Transaction();
-          tx.add(ComputeBudgetProgram.setComputeUnitLimit({ units: 400000 })); // Higher limit for priority
-          tx.add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: 1000000 })); // Higher priority fee
-          
-          // Add all instructions from buyTx
-          if (buyTx.instructions) {
-            buyTx.instructions.forEach(ix => tx.add(ix));
-          } else {
-            tx.add(buyTx);
-          }
-          
-          console.log(`📤 Dev wallet sending HIGH PRIORITY transaction with boosted fees...`);
-          devBuySignature = await sendTx(connection, tx, [mainKeypair]);
-          console.log(`✅ Dev wallet priority TX sent: https://solscan.io/tx/${devBuySignature}`);
-          
-          // CRITICAL: Verify buy actually worked (same as bot wallets)
-          console.log(`🔍 Verifying dev wallet purchase...`);
-          await new Promise(resolve => setTimeout(resolve, 3000)); // Wait for confirmation
-          
-          const afterBalance = await getTokenBalance(connection, devBotWallet.pub, mintKeypair.publicKey);
-          console.log(`📊 Dev wallet after balance: ${afterBalance} tokens`);
-          
-          if (afterBalance <= beforeBalance) {
-            throw new Error(`No tokens received. Before: ${beforeBalance}, After: ${afterBalance}`);
-          }
-          
-          // SUCCESS - Dev wallet bought successfully
-          const tokenReceived = afterBalance - beforeBalance;
-          const solLeft = await getBalance(connection, devBotWallet.pub);
-          
-          console.log(`🎉 Dev wallet SUCCESS: ${tokenReceived} tokens for ${initialBuy} SOL`);
-          
-          // Set dev wallet trade info for tracking
-          devBotWallet.trade = {
-            entryPricePerToken: initialBuy / tokenReceived,
-            entrySol: initialBuy
-          };
-          
-          devBuyActuallySucceeded = true;
-          deploymentSig = createSig; // Use creation signature as main signature
-          
-          // Add success log
-          session.liveLogs.push({
-            status: 'success',
-            message: `🎉 Dev wallet priority buy: ${initialBuy} SOL → ${tokenReceived.toFixed(2)} tokens`
-          });
-          
-          console.log(`✅ Dev wallet priority buy VERIFIED - ${tokenReceived} tokens received`);
-          session.liveLogs.push({ status: 'success', message: `💰 Dev Buy Complete! ${initialBuy} SOL → ${tokenReceived.toFixed(2)} tokens` });
-          session.liveLogs.push({ status: 'success', message: `👑 Dev wallet is FIRST BUYER ✅ TX: ${devBuySignature.slice(0, 16)}...` });
-          
-        } catch (buyError) {
-          console.error(`❌ Dev buy failed: ${buyError.message}`);
-          
-          // Don't show fake success - be clear about the failure
-          session.liveLogs.push({
-            status: 'error',
-            message: `❌ Dev buy failed: ${buyError.message}. Token created but dev wallet couldn't buy.`
-          });
-          
-          // If we have a signature but it failed, show that too
-          if (devBuySignature) {
-            session.liveLogs.push({
-              status: 'warning',
-              message: `🔗 Failed buy TX: ${devBuySignature.slice(0, 16)}...`
-            });
-          }
-          
-          deploymentSig = createSig; // Still return create signature since token was created
-        }
+      } catch (atomicErr) {
+        console.error('Fast atomic create+buy failed:', atomicErr.message);
+        throw atomicErr; // No fallback needed - this should work reliably
       }
 
     } else {
@@ -920,6 +686,42 @@ async function handleDeployRequest(bot, connection, data, chatId, session, termM
     }
 
     session.liveLogs.push({ status: 'completed', message: `✅ ${symbol} token successfully created` });
+
+    // ---------------- START HYBRID BATCH BUYING FOR BOT WALLETS ----------------
+    // After dev wallet successfully buys, start bot wallet hybrid batch buying
+    if (devBuyActuallySucceeded && session.buyers && session.buyers.length > 0) {
+      console.log(`🚀 Starting hybrid batch buying for ${session.buyers.length} bot wallets on token ${mintAddress}`);
+      
+      session.liveLogs.push({
+        status: 'processing',
+        message: `🤖 Starting hybrid batch buying for ${session.buyers.length} bot wallets...`
+      });
+
+      try {
+        // Use the new hybrid batch buying function
+        const { totalSuccess, totalFailed } = await executeHybridBatchBuying(
+          null, // No bot parameter needed
+          connection,
+          session,
+          null, // No chatId needed
+          mintAddress,
+          session.buyers
+        );
+
+        console.log(`📊 Bot wallet batch buying completed: ${totalSuccess} successful, ${totalFailed} failed`);
+        session.liveLogs.push({
+          status: 'completed',
+          message: `🤖 Bot swarm completed: ${totalSuccess} successful, ${totalFailed} failed`
+        });
+
+      } catch (batchErr) {
+        console.error('Hybrid batch buying error:', batchErr.message);
+        session.liveLogs.push({
+          status: 'error',
+          message: `❌ Bot batch buying failed: ${batchErr.message}`
+        });
+      }
+    }
 
     await editTerminal(
       `✅ *Deployment Complete!*\n\n` +
@@ -1413,7 +1215,6 @@ module.exports = {
   getBondingCurveData,
   calcBuyTokens,
   sendTx,
-  sendJitoBundle,
   executeAtomicCreateAndBuy,
   executeHybridBatchBuying,
   handleTransactionError
