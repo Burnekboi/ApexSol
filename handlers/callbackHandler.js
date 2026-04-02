@@ -1561,14 +1561,18 @@ Balance: ${balance.toFixed(4)} SOL`,
     if (!session.buyers?.length) {
       return editText('❌ No buyers.', {
         chat_id: chatId,
-        message_id: msgId
+        message_id: msgId,
+        parse_mode: 'Markdown',
+        ...tradePanel
       });
     }
 
     if (!session.tradeConfig.contractAddress) {
       return editText('❌ No contract.', {
         chat_id: chatId,
-        message_id: msgId
+        message_id: msgId,
+        parse_mode: 'Markdown',
+        ...tradePanel
       });
     }
 
