@@ -147,7 +147,45 @@ module.exports = async function callbackHandler(bot, query, session, connection)
   };
 
   const safeDelay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-
+  // ---------------- HOW TO USE ----------------
+  if (data === 'how_to_use') {
+    return editText(
+      `📖 *How to Use Cucumverse Bot*\n\n` +
+      `*Step 1 — Set Up Your Main Wallet*\n` +
+      `Tap *Create Wallet* to generate a new Solana wallet, or *Import Wallet* to bring in an existing one using your private key.\n\n` +
+      `*Step 2 — Generate Buyer Bots*\n` +
+      `After your main wallet is set, tap *Generate Buyer Wallets* and choose how many bot wallets you want (2, 10, 20, 50, or 100).\n\n` +
+      `*Step 3 — Fund Your Wallets*\n` +
+      `Send SOL to your main wallet address, then use *Distribute SOL* to spread funds across your buyer bots.\n\n` +
+      `*Step 4 — Configure Trading*\n` +
+      `Go to *Trade Settings* and set your contract address, slippage, min/max buy amounts, sell %, and take profit target.\n\n` +
+      `*Step 5A — Start Trading*\n` +
+      `Hit *Start Trading* and the bots will begin buying and selling the token automatically based on your settings.\n\n` +
+      `*Step 5B — Deploy a Token (Optional)*\n` +
+      `Use the *Deploy Token* button to launch your own token on pump.fun. Your buyer bots will snipe it at launch.\n\n` +
+      `*Step 6 — Sell & Withdraw*\n` +
+      `Use *Sell All* to dump all bot holdings, then *Transfer to Wallet* to collect SOL back to your main wallet.\n\n` +
+      `_Tip: Use Existing Wallets to switch between saved setups anytime._\n\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `📣 *For more info and updates, follow us:*\n\n` +
+      `💬 TG Channel: [t.me/cucumverse](https://t.me/cucumverse)\n` +
+      `🐦 X Page: [x.com/cucumverse](https://x.com/cucumverse)\n` +
+      `🌐 Website: [cucumverse.space](https://cucumverse.space)\n\n` +
+      `🪂 *Airdrop:* [t.me/CcvAirdropbot](https://t.me/CcvAirdropbot)\n` +
+      `🚀 *Presale:* [cucumverse.space/\\#presale](https://cucumverse.space/#presale)`,
+      {
+        chat_id: chatId,
+        message_id: msgId,
+        parse_mode: 'Markdown',
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '🏠 Back', callback_data: 'back_to_main' }]
+          ]
+        }
+      }
+    );
+  }
+  
   if (data === 'create_wallet') {
     await editReplyMarkup({ inline_keyboard: [] }, { chat_id: chatId, message_id: msgId });
 
