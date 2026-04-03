@@ -147,6 +147,22 @@ module.exports = async function callbackHandler(bot, query, session, connection)
   };
 
   const safeDelay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+  
+  if (data === 'deploy_token_check') {
+    return editText(
+      `🚀 *Deploy Token*\n\n` +
+      `Your main wallet needs at least *0.05 SOL* to enter the Web App.\n\n` +
+      `_Don't worry — this is just an entry requirement. No SOL will be deducted from your wallet just for opening the app._\n\n` +
+      `Current balance is below the minimum. Please top up your main wallet and try again.`,
+      {
+        chat_id: chatId,
+        message_id: msgId,
+        parse_mode: 'Markdown',
+        ...panels.actionMenu(session)
+      }
+    );
+  }
+  
   // ---------------- HOW TO USE ----------------
   if (data === 'how_to_use') {
     return editText(
