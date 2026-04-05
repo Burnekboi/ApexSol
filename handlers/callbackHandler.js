@@ -1502,7 +1502,7 @@ Balance: ${balance.toFixed(4)} SOL`,
 💰 Real-time stats to flex on the weak hands  
 
 Wallet: \`${session.mainWallet.address.slice(0,4)}...\`  
-Balance: ${balance.toFixed(4)} SOL`
+Balance: ${balance.toFixed(4)} SOL`,
       {
         chat_id: chatId,
         message_id: msgId,
